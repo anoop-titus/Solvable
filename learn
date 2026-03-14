@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""
+Unified learning daemon. Runs Dropbox + Email learning continuously.
+  learn                          -- start daemon (sequential, loops forever)
+  learn --parallel               -- all sources in parallel (Dropbox + email)
+  learn --parallel --dropbox     -- parallel Dropbox only
+  learn --parallel --email       -- parallel email only
+  learn --parallel --aggressive  -- 3x process multiplier per source
+  learn --stop                   -- stop the daemon
+  learn --status                 -- show daemon status
+  learn --once                   -- run one pass and exit
+  learn --tui                    -- open the Ratatui dashboard
+"""
+import argparse
+import multiprocessing
+import os
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+
+from learner_config import (
+    get_db_path, get_dropbox_folders, get_imap_config,
+    get_airtable_config, get_research_config,
+)
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PID_FILE = os.path.join(SCRIPT_DIR, "learn.pid")
+LOG_FILE = os.path.join(SCRIPT_DIR, "logs", "learn-daemon.log")
+DB_PATH = get_db_path()
+DROPBOX_SCRIPT = os.path.join(SCRIPT_DIR, "learn_dropbox.py")
+EMAIL_SCRIPT = os.path.join(SCRIPT_DIR, "learn_email.py")
+EMAIL_IMAP_SCRIPT = os.path.join(SCRIPT_DIR, "learn_email_imap.py")
+_research_cfg = get_research_config()
+RESEARCH_SCRIPT = _research_cfg["script"]
+TUI_BIN = os.path.join(SCRIPT_DIR, "learner-tui", "target", "release", "learner-tui")
+EMAIL_INTERVAL_HOURS = 6
+
+# Build folder list and account lists from config
+_dropbox_folders = get_dropbox_folders()
+FOLDERS = [f["agent"] for f in _dropbox_folders] if _dropbox_folders else []
+
+_imap_accounts = get_imap_config().get("accounts", {})
+_sender_groups = get_airtable_config().get("sender_groups", {})
+
+
+def log(msg):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    with open(LOG_FILE, "a") as f:
+        f.write(line + "\n")
+
+
+def _ensure_pid_column():
+    """Add pid column to run_progress if missing (idempotent migration)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(run_progress)").fetchall()]
+        if "pid" not in cols:
+            conn.execute("ALTER TABLE run_progress ADD COLUMN pid INTEGER DEFAULT 0")
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _ensure_topic_column():
+    """Add topic column to learnings if missing (idempotent migration)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(learnings)").fetchall()]
+        if "topic" not in cols:
+            conn.execute("ALTER TABLE learnings ADD COLUMN topic TEXT DEFAULT ''")
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _write_pid_file():
+    """Write per-process PID file."""
+    pid = os.getpid()
+    pid_file = os.path.join(SCRIPT_DIR, f"learn-{pid}.pid")
+    with open(pid_file, "w") as f:
+        f.write(str(pid))
+    return pid_file
+
+
+def _cleanup_pid_file(pid_file):
+    """Remove per-process PID file."""
+    try:
+        if os.path.exists(pid_file):
+            os.remove(pid_file)
+    except OSError:
+        pass
+
+
+def _kill_pid(pid, label="process"):
+    """Send SIGTERM to a PID, wait up to 5s, then SIGKILL if still alive."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"  SIGTERM -> {label} (PID {pid})")
+    except (OSError, ProcessLookupError):
+        return
+    for _ in range(5):
+        try:
+            os.kill(pid, 0)
+            time.sleep(1)
+        except (OSError, ProcessLookupError):
+            return
+    try:
+        os.kill(pid, signal.SIGKILL)
+        print(f"  SIGKILL -> {label} (PID {pid})")
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _find_learn_pids():
+    """Find all PIDs running learn, learn_dropbox.py, or learn_email.py."""
+    pids = []
+    my_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,args", "--no-headers"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2:
+                continue
+            pid, cmdline = int(parts[0]), parts[1]
+            if pid == my_pid:
+                continue
+            if any(marker in cmdline for marker in [
+                "learn_dropbox.py", "learn_email.py", "learn_email_imap.py",
+                "learner-agent/learn",
+            ]):
+                pids.append((pid, cmdline.strip()[:60]))
+    except Exception:
+        pass
+    return pids
+
+
+def stop_daemon(target_run_id=None):
+    killed = 0
+
+    if target_run_id:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute(
+                "SELECT pid FROM run_progress WHERE run_id = ? AND status = 'running' AND pid > 0",
+                (target_run_id,),
+            ).fetchone()
+            conn.close()
+            if row:
+                _kill_pid(row[0], f"run {target_run_id}")
+                killed = 1
+            else:
+                print(f"No running process found for run_id {target_run_id}")
+        except Exception as e:
+            print(f"Error looking up run: {e}")
+        if killed:
+            print(f"Stopped 1 process for run {target_run_id}.")
+        return
+
+    if os.path.exists(PID_FILE):
+        with open(PID_FILE) as f:
+            pid = int(f.read().strip())
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+            print(f"  SIGTERM -> process group {pgid} (daemon PID {pid})")
+            killed += 1
+            time.sleep(2)
+        except (OSError, ProcessLookupError):
+            print(f"  PID {pid} from pidfile not running.")
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+
+    import glob
+    for pf in glob.glob(os.path.join(SCRIPT_DIR, "learn-*.pid")):
+        try:
+            with open(pf) as f:
+                pid = int(f.read().strip())
+            _kill_pid(pid, f"pid-file {pf}")
+            killed += 1
+        except (OSError, ValueError):
+            pass
+        try:
+            os.remove(pf)
+        except OSError:
+            pass
+
+    remaining = _find_learn_pids()
+    if remaining:
+        print(f"  Found {len(remaining)} remaining process(es):")
+        for pid, cmd in remaining:
+            _kill_pid(pid, cmd)
+            killed += 1
+        time.sleep(1)
+        stragglers = _find_learn_pids()
+        for pid, cmd in stragglers:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                print(f"  SIGKILL -> straggler (PID {pid})")
+                killed += 1
+            except (OSError, ProcessLookupError):
+                pass
+
+    if killed:
+        print(f"Stopped {killed} learn process(es).")
+    else:
+        print("No learn processes found.")
+
+
+def show_status():
+    pids = _find_learn_pids()
+    if pids:
+        print(f"Learner processes running ({len(pids)}):")
+        for pid, cmd in pids:
+            print(f"  PID {pid}: {cmd}")
+        if os.path.exists(LOG_FILE):
+            lines = open(LOG_FILE).readlines()[-5:]
+            for line in lines:
+                print(f"  {line.rstrip()}")
+    else:
+        print("Learner daemon not running.")
+
+
+def show_jobs():
+    """Show active jobs from run_progress table."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT run_id, source, agent, folder, total_files, processed, status, pid, started_at "
+            "FROM run_progress WHERE status = 'running' ORDER BY started_at DESC"
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"Error reading jobs: {e}")
+        return
+
+    if not rows:
+        print("No active jobs.")
+        return
+
+    print(f"{'Run ID':>10}  {'PID':>6}  {'Source':<8}  {'Agent':<16}  {'Folder':<24}  {'Progress':>10}  {'Started'}")
+    print(f"{'---'*3:>10}  {'---'*2:>6}  {'---'*3:<8}  {'---'*5:<16}  {'---'*8:<24}  {'---'*3:>10}  {'---'*6}")
+    for row in rows:
+        run_id, source, agent, folder, total, processed, status, pid, started = row
+        progress = f"{processed or 0}/{total or 0}"
+        run_short = (run_id or "")[:10]
+        print(f"{run_short:>10}  {pid or 0:>6}  {source or '':<8}  {agent or '':<16}  {(folder or '')[:24]:<24}  {progress:>10}  {started or ''}")
+
+
+def run_script(script, args=None):
+    """Run a learning script, return success bool."""
+    cmd = [sys.executable, script] + (args or [])
+    try:
+        result = subprocess.run(cmd, cwd=SCRIPT_DIR, timeout=7200)
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        log(f"TIMEOUT: {os.path.basename(script)}")
+        return False
+    except Exception as e:
+        log(f"ERROR running {os.path.basename(script)}: {e}")
+        return False
+
+
+def daemon_loop():
+    """Main daemon loop: Dropbox continuously, Email every N hours."""
+    log("Learner daemon started")
+
+    pid_file = _write_pid_file()
+    last_email_run = datetime.min
+    running = True
+
+    def handle_stop(signum, frame):
+        nonlocal running
+        log("Received stop signal. Finishing current file...")
+        running = False
+
+    signal.signal(signal.SIGTERM, handle_stop)
+    signal.signal(signal.SIGINT, handle_stop)
+
+    try:
+        while running:
+            for folder_agent in FOLDERS:
+                if not running:
+                    break
+                log(f"Dropbox learning: {folder_agent}")
+                run_script(DROPBOX_SCRIPT, ["--folder", folder_agent])
+
+            now = datetime.now()
+            if now - last_email_run > timedelta(hours=EMAIL_INTERVAL_HOURS):
+                if running:
+                    log("Email learning (IMAP): starting")
+                    run_script(EMAIL_IMAP_SCRIPT)
+                    last_email_run = now
+
+            if running:
+                log("Cycle complete. Sleeping 60s before next cycle...")
+                for _ in range(60):
+                    if not running:
+                        break
+                    time.sleep(1)
+    finally:
+        _cleanup_pid_file(pid_file)
+        log("Learner daemon stopped")
+
+
+def build_task_list(dropbox=True, email=True, aggressive=False, research=False):
+    """Build list of (label, script, args) tuples for parallel execution."""
+    multiplier = 3 if aggressive else 1
+    tasks = []
+    if dropbox:
+        for folder_agent in FOLDERS:
+            for n in range(multiplier):
+                label = f"dropbox/{folder_agent}" + (f"#{n+1}" if multiplier > 1 else "")
+                tasks.append((label, DROPBOX_SCRIPT, ["--folder", folder_agent]))
+    if email:
+        # IMAP -- one process per account
+        for account_key in _imap_accounts:
+            tasks.append((f"email-imap/{account_key}", EMAIL_IMAP_SCRIPT, ["--account", account_key]))
+        # Airtable sender groups
+        for group_name in _sender_groups:
+            tasks.append((f"email-airtable/{group_name}", EMAIL_SCRIPT, ["--sender", group_name]))
+    if research and RESEARCH_SCRIPT:
+        tasks.append(("research", RESEARCH_SCRIPT, ["--once"]))
+    return tasks
+
+
+def parallel_loop(dropbox=True, email=True, aggressive=False, research=False):
+    """Run learning sources in parallel using multiprocessing."""
+    tasks = build_task_list(dropbox=dropbox, email=email, aggressive=aggressive, research=research)
+
+    log(f"Parallel learning: {len(tasks)} processes")
+    for label, _, _ in tasks:
+        log(f"  -> {label}")
+
+    pid_file = _write_pid_file()
+
+    processes = []
+    for label, script, args in tasks:
+        p = multiprocessing.Process(
+            target=run_script,
+            args=(script, args),
+            name=label,
+            daemon=True,
+        )
+        processes.append((label, p))
+
+    def handle_stop(signum, frame):
+        log("Received stop signal. Terminating parallel processes...")
+        for label, p in processes:
+            if p.is_alive():
+                p.terminate()
+
+    signal.signal(signal.SIGTERM, handle_stop)
+    signal.signal(signal.SIGINT, handle_stop)
+
+    try:
+        for label, p in processes:
+            p.start()
+            log(f"  Started {label} (PID {p.pid})")
+
+        for label, p in processes:
+            p.join()
+            log(f"  Finished {label} (exit {p.exitcode})")
+    finally:
+        _cleanup_pid_file(pid_file)
+        log("Parallel learning complete")
+
+
+def run_once():
+    """Single pass: both Dropbox and Email (IMAP)."""
+    log("Running single pass (all sources)")
+    run_script(DROPBOX_SCRIPT, ["--folder", "all"])
+    run_script(EMAIL_IMAP_SCRIPT)
+    log("Single pass complete")
+
+
+def main():
+    # Run DB migrations on startup
+    _ensure_pid_column()
+    _ensure_topic_column()
+
+    parser = argparse.ArgumentParser(description="Learner Agent Daemon")
+    parser.add_argument("--stop", nargs="?", const="__all__", default=None,
+                        metavar="RUN_ID",
+                        help="Stop all learn processes, or a specific run by ID")
+    parser.add_argument("--status", action="store_true", help="Show daemon status")
+    parser.add_argument("--jobs", action="store_true", help="List active jobs")
+    parser.add_argument("--once", action="store_true", help="Run one pass and exit")
+    parser.add_argument("--tui", "--dashboard", "--dash", "-d",
+                        action="store_true", dest="tui",
+                        help="Open the Ratatui dashboard")
+    parser.add_argument("--parallel", "-p", action="store_true",
+                        help="Run sources in parallel")
+    parser.add_argument("--dropbox", action="store_true",
+                        help="Priority: Dropbox sources only")
+    parser.add_argument("--email", action="store_true",
+                        help="Priority: Email sources only")
+    parser.add_argument("--aggressive", "-a", action="store_true",
+                        help="3x process multiplier per source")
+    parser.add_argument("--research", action="store_true",
+                        help="Include researcher daemon alongside learning")
+    args = parser.parse_args()
+
+    if args.tui:
+        os.execv(TUI_BIN, [TUI_BIN])
+    elif args.stop is not None:
+        if args.stop == "__all__":
+            stop_daemon()
+        else:
+            stop_daemon(target_run_id=args.stop)
+    elif args.jobs:
+        show_jobs()
+    elif args.status:
+        show_status()
+    elif args.parallel:
+        do_dropbox = True
+        do_email = True
+        if args.dropbox and not args.email:
+            do_email = False
+        elif args.email and not args.dropbox:
+            do_dropbox = False
+        parallel_loop(dropbox=do_dropbox, email=do_email, aggressive=args.aggressive,
+                      research=args.research)
+    elif args.once:
+        run_once()
+    else:
+        daemon_loop()
+
+
+if __name__ == "__main__":
+    main()

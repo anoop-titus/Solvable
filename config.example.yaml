@@ -1,0 +1,78 @@
+# Learner Agent Configuration
+# Copy to config.yaml and customize for your setup.
+#
+# Quick start:
+#   cp config.example.yaml config.yaml
+#   cp .env.example .env
+#   # Edit both files with your values
+#   ./learn --once
+
+# LLM model for learning extraction (OpenRouter format)
+model: "openrouter/google/gemini-2.5-flash"
+
+# Chunk size for splitting large documents (chars)
+chunk_size: 100000
+
+# === IMAP Email Accounts ===
+# Each account connects to an IMAP server and fetches emails.
+# Accounts sharing the same server can use filter_to to split by To: address.
+imap:
+  host: "127.0.0.1"
+  port: 993
+  starttls: false
+  accounts:
+    account-1:
+      email: "user@example.com"
+      agent: "my-agent"
+      env_user: "IMAP_USERNAME"       # env var name holding the username
+      env_pass: "IMAP_PASSWORD"       # env var name holding the password
+      filter_to: ""                   # optional: only process emails where To contains this
+    # account-2:
+    #   email: "user2@example.com"
+    #   agent: "my-other-agent"
+    #   env_user: "IMAP_USERNAME_2"
+    #   env_pass: "IMAP_PASSWORD_2"
+    #   filter_to: "user2"
+
+# === Airtable Email Accounts ===
+# Maps Airtable "account" field values to agent names.
+airtable:
+  account_map:
+    "admin@example.com": "my-agent"
+  sender_groups:
+    my-group:
+      - "admin@example.com"
+
+# === Dropbox Folders ===
+# Each entry maps a Dropbox folder path to an agent.
+dropbox:
+  folders:
+    - agent: "my-agent"
+      path: "/Documents/Project-A"
+    # - agent: "my-other-agent"
+    #   path: "/Documents/Project-B"
+
+# === Agent Prompts ===
+# System prompts that guide LLM extraction per agent.
+# The LLM receives this context + document content and returns a JSON array of learnings.
+agents:
+  my-agent:
+    prompt: >
+      You are a learning agent extracting knowledge from documents.
+      Focus on: key decisions, action items, deadlines, financial figures,
+      relationships, and strategic insights.
+
+      Extract 3-8 specific, actionable learnings from the following content.
+      Include names, dates, amounts, and terms where present.
+      Return ONLY a JSON array of strings: ["learning 1", "learning 2", ...]
+      IMPORTANT: Always respond in English only.
+
+# === Google Workspace CLI (optional) ===
+# Path to gws binary for fetching Google Drive attachments from emails.
+# Set to null to disable Google Drive integration.
+gws_bin: null  # e.g., "/usr/local/bin/gws"
+
+# === Research Integration (optional) ===
+# Path to a companion research daemon, if you have one.
+research_script: null
+research_db: null
