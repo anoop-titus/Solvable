@@ -6,7 +6,9 @@ mod screens;
 mod io_layer;
 
 use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::collections::HashMap;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
@@ -16,8 +18,18 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::{App, Screen, Tab};
+use io_layer::oauth::{self, OAuthProvider, OAuthStatus, DeviceFlowState};
 use ui::PanelAreas;
 use widgets::tab_bar::TabBarState;
+
+/// Shared result channel for background OAuth flows
+type OAuthResult = Arc<Mutex<Option<Result<HashMap<String, String>, String>>>>;
+
+/// State for an active device code polling loop
+struct DevicePollState {
+    flow: DeviceFlowState,
+    last_poll: std::time::Instant,
+}
 
 const DEFAULT_DB_PATH: &str = "./db/learnings.db";
 const RESEARCH_DB_PATH: &str = "./db/research.db";
@@ -43,6 +55,10 @@ fn main() -> io::Result<()> {
     let mut panel_areas = PanelAreas::default();
     let mut tab_bar_state = TabBarState::default();
     let mut tick_since_refresh: u64 = 0;
+
+    // OAuth background state
+    let oauth_result: OAuthResult = Arc::new(Mutex::new(None));
+    let mut device_poll: Option<DevicePollState> = None;
 
     terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
 
@@ -87,6 +103,60 @@ fn main() -> io::Result<()> {
                                 if app.portal.has_focused_dropdown() {
                                     if let Some(dd) = app.portal.focused_dropdown_mut() {
                                         dd.toggle();
+                                    }
+                                }
+                                // If on an OAuth button, start the flow
+                                if let Some(provider) = app.portal.focused_oauth_provider() {
+                                    match provider {
+                                        OAuthProvider::Google | OAuthProvider::Dropbox => {
+                                            // Localhost redirect flow in background thread
+                                            app.portal.oauth_status = OAuthStatus::WaitingForBrowser;
+                                            let result_clone = Arc::clone(&oauth_result);
+                                            let provider_clone = provider.clone();
+                                            // Use client_id from the corresponding env key, or prompt
+                                            let client_id = get_client_id_for_provider(&app, &provider_clone);
+                                            if client_id.is_empty() {
+                                                app.portal.oauth_status = OAuthStatus::Error(
+                                                    format!("Set {}_CLIENT_ID in .env first", provider_clone.env_prefix())
+                                                );
+                                            } else {
+                                                let client_secret = get_client_secret_for_provider(&app, &provider_clone);
+                                                std::thread::spawn(move || {
+                                                    let secret_ref = if client_secret.is_empty() { None } else { Some(client_secret.as_str()) };
+                                                    let result = oauth::localhost_redirect_flow(&provider_clone, &client_id, secret_ref);
+                                                    if let Ok(mut guard) = result_clone.lock() {
+                                                        *guard = Some(result);
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        OAuthProvider::Microsoft => {
+                                            // Device code flow
+                                            let client_id = get_client_id_for_provider(&app, &provider);
+                                            if client_id.is_empty() {
+                                                app.portal.oauth_status = OAuthStatus::Error(
+                                                    "Set MICROSOFT_CLIENT_ID in .env first".to_string()
+                                                );
+                                            } else {
+                                                match oauth::start_device_flow(&client_id) {
+                                                    Ok(flow) => {
+                                                        app.portal.oauth_status = OAuthStatus::WaitingForDevice {
+                                                            url: flow.verification_uri.clone(),
+                                                            code: flow.user_code.clone(),
+                                                        };
+                                                        // Try to open the browser to the verification URL
+                                                        let _ = open::that(&flow.verification_uri);
+                                                        device_poll = Some(DevicePollState {
+                                                            flow,
+                                                            last_poll: std::time::Instant::now(),
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        app.portal.oauth_status = OAuthStatus::Error(e);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -275,6 +345,52 @@ fn main() -> io::Result<()> {
                 app.refresh();
                 tick_since_refresh = 0;
             }
+
+            // Check for completed OAuth localhost redirect flow
+            if let Ok(mut guard) = oauth_result.try_lock() {
+                if let Some(result) = guard.take() {
+                    match result {
+                        Ok(tokens) => {
+                            // Save tokens to .env
+                            let _ = io_layer::env_store::save(&app.env_path, &tokens);
+                            app.portal.oauth_status = OAuthStatus::Success(tokens);
+                            app.portal.status_message = Some(("OAuth tokens saved!".to_string(), true));
+                            app.portal.status_tick = app.tick_count;
+                        }
+                        Err(e) => {
+                            app.portal.oauth_status = OAuthStatus::Error(e);
+                        }
+                    }
+                }
+            }
+
+            // Poll for device code flow completion (Microsoft)
+            if let Some(ref poll_state) = device_poll {
+                let elapsed = poll_state.last_poll.elapsed().as_secs();
+                if elapsed >= poll_state.flow.interval {
+                    match poll_state.flow.poll_for_token() {
+                        Ok(Some(tokens)) => {
+                            let _ = io_layer::env_store::save(&app.env_path, &tokens);
+                            app.portal.oauth_status = OAuthStatus::Success(tokens);
+                            app.portal.status_message = Some(("Microsoft OAuth complete!".to_string(), true));
+                            app.portal.status_tick = app.tick_count;
+                            device_poll = None;
+                        }
+                        Ok(None) => {
+                            // Still waiting, update last_poll time
+                        }
+                        Err(e) => {
+                            app.portal.oauth_status = OAuthStatus::Error(e);
+                            device_poll = None;
+                        }
+                    }
+                    // Update the last_poll timestamp
+                    if let Some(ref mut ps) = device_poll {
+                        ps.last_poll = std::time::Instant::now();
+                    }
+                }
+            }
+
             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
         }
 
@@ -292,7 +408,6 @@ fn is_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> bool {
 }
 
 fn save_portal_section(app: &App, section: &str) {
-    use std::collections::HashMap;
     use io_layer::env_store;
     let mut values = HashMap::new();
     match section {
@@ -316,4 +431,18 @@ fn save_portal_section(app: &App, section: &str) {
         _ => {}
     }
     let _ = env_store::save(&app.env_path, &values);
+}
+
+/// Read {PROVIDER}_CLIENT_ID from .env
+fn get_client_id_for_provider(app: &App, provider: &OAuthProvider) -> String {
+    let env = io_layer::env_store::load(&app.env_path);
+    let key = format!("{}_CLIENT_ID", provider.env_prefix());
+    env.get(&key).cloned().unwrap_or_default()
+}
+
+/// Read {PROVIDER}_CLIENT_SECRET from .env
+fn get_client_secret_for_provider(app: &App, provider: &OAuthProvider) -> String {
+    let env = io_layer::env_store::load(&app.env_path);
+    let key = format!("{}_CLIENT_SECRET", provider.env_prefix());
+    env.get(&key).cloned().unwrap_or_default()
 }

@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 use crate::theme;
+use crate::io_layer::oauth::OAuthStatus;
 use crate::widgets::text_input::{TextInputState, render_text_input};
 use crate::widgets::button::{ButtonState, render_button};
 use crate::widgets::dropdown::{DropdownState, render_dropdown};
@@ -31,6 +32,12 @@ pub struct PortalState {
     pub airtable_key: TextInputState,
     pub airtable_base: TextInputState,
     pub airtable_save_btn: ButtonState,
+
+    // OAuth authorize buttons
+    pub google_auth_btn: ButtonState,
+    pub microsoft_auth_btn: ButtonState,
+    pub dropbox_auth_btn: ButtonState,
+    pub oauth_status: OAuthStatus,
 
     // Focus tracking
     pub focus_index: usize,
@@ -65,6 +72,11 @@ impl PortalState {
             airtable_base: TextInputState::new("Base ID", false, "appXXXXXXXXX"),
             airtable_save_btn: ButtonState::new("Save"),
 
+            google_auth_btn: ButtonState::new("Authorize Google"),
+            microsoft_auth_btn: ButtonState::new("Authorize Microsoft"),
+            dropbox_auth_btn: ButtonState::new("Authorize Dropbox"),
+            oauth_status: OAuthStatus::Idle,
+
             focus_index: 0,
             scroll_offset: 0,
             status_message: None,
@@ -89,7 +101,14 @@ impl PortalState {
         }
     }
 
-    pub fn focus_count(&self) -> usize { 13 }
+    // Focus layout (16 items):
+    //  0: api_key          1: model_dropdown    2: ai_save_btn
+    //  3: dropbox_auth_btn  4: dropbox_token     5: dropbox_save_btn
+    //  6: google_auth_btn   7: microsoft_auth_btn
+    //  8: imap_host         9: imap_port        10: imap_user       11: imap_pass
+    // 12: imap_save_btn
+    // 13: airtable_key     14: airtable_base    15: airtable_save_btn
+    pub fn focus_count(&self) -> usize { 16 }
 
     pub fn advance_focus(&mut self) {
         self.clear_all_focus();
@@ -120,14 +139,15 @@ impl PortalState {
         match self.focus_index {
             0 => self.api_key.focused = true,
             1 => self.model_dropdown.focused = true,
-            3 => self.dropbox_token.focused = true,
-            5 => self.imap_host.focused = true,
-            6 => self.imap_port.focused = true,
-            7 => self.imap_user.focused = true,
-            8 => self.imap_pass.focused = true,
-            10 => self.airtable_key.focused = true,
-            11 => self.airtable_base.focused = true,
-            _ => {} // Buttons (2, 4, 9, 12) don't have a "focused" field
+            4 => self.dropbox_token.focused = true,
+            8 => self.imap_host.focused = true,
+            9 => self.imap_port.focused = true,
+            10 => self.imap_user.focused = true,
+            11 => self.imap_pass.focused = true,
+            13 => self.airtable_key.focused = true,
+            14 => self.airtable_base.focused = true,
+            // Buttons (2,3,5,6,7,12,15) don't have a "focused" field on TextInputState
+            _ => {}
         }
     }
 
@@ -164,9 +184,20 @@ impl PortalState {
     pub fn focused_save_section(&self) -> Option<&str> {
         match self.focus_index {
             2 => Some("ai"),
-            4 => Some("dropbox"),
-            9 => Some("imap"),
-            12 => Some("airtable"),
+            5 => Some("dropbox"),
+            12 => Some("imap"),
+            15 => Some("airtable"),
+            _ => None,
+        }
+    }
+
+    /// Returns which OAuth provider button is currently focused
+    pub fn focused_oauth_provider(&self) -> Option<crate::io_layer::oauth::OAuthProvider> {
+        use crate::io_layer::oauth::OAuthProvider;
+        match self.focus_index {
+            3 => Some(OAuthProvider::Dropbox),
+            6 => Some(OAuthProvider::Google),
+            7 => Some(OAuthProvider::Microsoft),
             _ => None,
         }
     }
@@ -182,16 +213,39 @@ pub fn render(f: &mut Frame, portal: &mut PortalState, area: Rect) {
         Constraint::Length(1),  // header / status
         Constraint::Length(6),  // AI Model section
         Constraint::Length(1),  // spacer
-        Constraint::Length(4),  // Dropbox section
+        Constraint::Length(5),  // Dropbox section (now includes OAuth btn)
         Constraint::Length(1),  // spacer
-        Constraint::Length(10), // IMAP section
+        Constraint::Length(12), // IMAP section (now includes 2 OAuth btns)
         Constraint::Length(1),  // spacer
         Constraint::Length(7),  // Airtable section
         Constraint::Min(0),    // fill
     ]).split(inner);
 
-    // Header or status message
-    if let Some((ref msg, is_success)) = portal.status_message {
+    // Header or status message (includes OAuth status)
+    let header_text = match &portal.oauth_status {
+        OAuthStatus::WaitingForBrowser => Some(("  Opening browser for authorization...".to_string(), false)),
+        OAuthStatus::WaitingForDevice { url, code } => {
+            Some((format!("  Go to {} and enter code: {}", url, code), false))
+        }
+        OAuthStatus::Error(msg) => Some((format!("  OAuth error: {}", msg), false)),
+        OAuthStatus::Success(_) => Some(("  OAuth authorization complete!".to_string(), true)),
+        _ => None,
+    };
+
+    if let Some((ref msg, is_success)) = header_text {
+        let style = if is_success { theme::SUCCESS } else { Style::default().fg(Color::Yellow) };
+        if matches!(portal.oauth_status, OAuthStatus::Error(_)) {
+            f.render_widget(
+                Paragraph::new(Span::styled(msg.clone(), Style::default().fg(Color::Red))),
+                sections[0],
+            );
+        } else {
+            f.render_widget(
+                Paragraph::new(Span::styled(msg.clone(), style)),
+                sections[0],
+            );
+        }
+    } else if let Some((ref msg, is_success)) = portal.status_message {
         let style = if is_success { theme::SUCCESS } else { Style::default().fg(Color::Red) };
         f.render_widget(
             Paragraph::new(Span::styled(format!("  {}", msg), style)),
@@ -209,10 +263,10 @@ pub fn render(f: &mut Frame, portal: &mut PortalState, area: Rect) {
     // AI Model section
     render_ai_section(f, portal, sections[1]);
 
-    // Dropbox section
+    // Dropbox section (with OAuth button)
     render_dropbox_section(f, portal, sections[3]);
 
-    // IMAP section
+    // IMAP section (with Google + Microsoft OAuth buttons)
     render_imap_section(f, portal, sections[5]);
 
     // Airtable section
@@ -259,15 +313,20 @@ fn render_ai_section(f: &mut Frame, portal: &mut PortalState, area: Rect) {
 fn render_dropbox_section(f: &mut Frame, portal: &mut PortalState, area: Rect) {
     let rows = Layout::vertical([
         Constraint::Length(1),  // header
-        Constraint::Length(3),  // token
+        Constraint::Length(1),  // OAuth button row
+        Constraint::Length(3),  // token + save
     ]).split(area);
 
     render_section_header(f, "Dropbox", !portal.dropbox_token.value.is_empty(), rows[0]);
 
+    // OAuth authorize button
+    let oauth_area = Rect { x: area.x + 2, width: 22, ..rows[1] };
+    render_focus_button(f, &mut portal.dropbox_auth_btn, oauth_area, portal.focus_index == 3);
+
     let fields = Layout::horizontal([
         Constraint::Min(20),
         Constraint::Length(10),
-    ]).split(Rect { x: area.x + 2, width: area.width.saturating_sub(4), ..rows[1] });
+    ]).split(Rect { x: area.x + 2, width: area.width.saturating_sub(4), ..rows[2] });
     render_text_input(f, &mut portal.dropbox_token, fields[0]);
     render_button(f, &mut portal.dropbox_save_btn, Rect { y: fields[1].y + 1, height: 1, ..fields[1] });
 }
@@ -275,6 +334,8 @@ fn render_dropbox_section(f: &mut Frame, portal: &mut PortalState, area: Rect) {
 fn render_imap_section(f: &mut Frame, portal: &mut PortalState, area: Rect) {
     let rows = Layout::vertical([
         Constraint::Length(1),  // header
+        Constraint::Length(1),  // OAuth buttons row (Google + Microsoft)
+        Constraint::Length(1),  // spacer / "or enter manually" label
         Constraint::Length(3),  // host + port
         Constraint::Length(3),  // user + pass
         Constraint::Length(1),  // save button
@@ -282,22 +343,53 @@ fn render_imap_section(f: &mut Frame, portal: &mut PortalState, area: Rect) {
 
     render_section_header(f, "Email / IMAP", !portal.imap_host.value.is_empty(), rows[0]);
 
+    // OAuth authorize buttons (side by side)
+    let oauth_cols = Layout::horizontal([
+        Constraint::Length(22),
+        Constraint::Length(1),
+        Constraint::Length(26),
+        Constraint::Min(0),
+    ]).split(Rect { x: area.x + 2, width: area.width.saturating_sub(4), ..rows[1] });
+    render_focus_button(f, &mut portal.google_auth_btn, oauth_cols[0], portal.focus_index == 6);
+    render_focus_button(f, &mut portal.microsoft_auth_btn, oauth_cols[2], portal.focus_index == 7);
+
+    // "or enter manually" label
+    f.render_widget(
+        Paragraph::new(Span::styled("  or enter manually:", Style::default().fg(Color::DarkGray))),
+        rows[2],
+    );
+
     let row1 = Layout::horizontal([
         Constraint::Percentage(65),
         Constraint::Percentage(35),
-    ]).split(Rect { x: area.x + 2, width: area.width.saturating_sub(4), ..rows[1] });
+    ]).split(Rect { x: area.x + 2, width: area.width.saturating_sub(4), ..rows[3] });
     render_text_input(f, &mut portal.imap_host, row1[0]);
     render_text_input(f, &mut portal.imap_port, row1[1]);
 
     let row2 = Layout::horizontal([
         Constraint::Percentage(50),
         Constraint::Percentage(50),
-    ]).split(Rect { x: area.x + 2, width: area.width.saturating_sub(4), ..rows[2] });
+    ]).split(Rect { x: area.x + 2, width: area.width.saturating_sub(4), ..rows[4] });
     render_text_input(f, &mut portal.imap_user, row2[0]);
     render_text_input(f, &mut portal.imap_pass, row2[1]);
 
-    let btn_area = Rect { x: area.x + 2, width: 10, ..rows[3] };
+    let btn_area = Rect { x: area.x + 2, width: 10, ..rows[5] };
     render_button(f, &mut portal.imap_save_btn, btn_area);
+}
+
+/// Render a button with focus highlight (used for OAuth authorize buttons)
+fn render_focus_button(f: &mut Frame, state: &mut ButtonState, area: Rect, focused: bool) {
+    state.area = area;
+    let style = if focused {
+        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let text = format!("[ {} ]", state.label);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(text, style)])),
+        area,
+    );
 }
 
 fn render_airtable_section(f: &mut Frame, portal: &mut PortalState, area: Rect) {
