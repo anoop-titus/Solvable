@@ -3,41 +3,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget},
+    widgets::{Gauge, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget},
     Frame,
 };
 
 use crate::app::{App, RunProgress, Tab};
-
-const BORDER_STYLE: Style = Style::new().fg(Color::DarkGray);
-const TITLE_STYLE: Style = Style::new().fg(Color::Cyan);
-const LABEL_STYLE: Style = Style::new().fg(Color::DarkGray);
-const DATA_STYLE: Style = Style::new().fg(Color::White);
-const GREEN_STYLE: Style = Style::new().fg(Color::Green);
-const HIGHLIGHT_STYLE: Style = Style::new().fg(Color::White).bg(Color::DarkGray);
-const MAGENTA_STYLE: Style = Style::new().fg(Color::Magenta);
-
-fn styled_block(title: &str) -> Block<'_> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(BORDER_STYLE)
-        .title(Span::styled(
-            format!(" {} ", title),
-            TITLE_STYLE.add_modifier(Modifier::BOLD),
-        ))
-}
-
-fn styled_block_magenta(title: &str) -> Block<'_> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(BORDER_STYLE)
-        .title(Span::styled(
-            format!(" {} ", title),
-            MAGENTA_STYLE.add_modifier(Modifier::BOLD),
-        ))
-}
+use crate::theme;
 
 pub struct PanelAreas {
     pub dropbox_runs: Rect,
@@ -63,12 +34,12 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas) {
     if app.db_missing && app.current_tab == Tab::Learnings {
         let msg = Paragraph::new("No database found. Waiting...")
             .style(Style::default().fg(Color::Yellow))
-            .block(styled_block("Learner Agent").title_alignment(ratatui::layout::Alignment::Center));
+            .block(theme::styled_block("Learner Agent").title_alignment(ratatui::layout::Alignment::Center));
         f.render_widget(msg, f.area());
         return;
     }
 
-    let outer = styled_block("Learner Agent")
+    let outer = theme::styled_block("Learner Agent")
         .title_alignment(ratatui::layout::Alignment::Center);
     let outer_area = f.area();
     let inner_area = outer.inner(outer_area);
@@ -96,15 +67,15 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas) {
 fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     let learnings_style = if app.current_tab == Tab::Learnings {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD).add_modifier(Modifier::REVERSED)
-    } else { LABEL_STYLE };
+    } else { theme::LABEL };
     let research_style = if app.current_tab == Tab::Research {
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD).add_modifier(Modifier::REVERSED)
-    } else { LABEL_STYLE };
+    } else { theme::LABEL };
 
     f.render_widget(Paragraph::new(Line::from(vec![
-        Span::styled("  ", LABEL_STYLE),
+        Span::styled("  ", theme::LABEL),
         Span::styled(" Learnings ", learnings_style),
-        Span::styled(" | ", LABEL_STYLE),
+        Span::styled(" | ", theme::LABEL),
         Span::styled(" Research ", research_style),
     ])), area);
 }
@@ -135,13 +106,13 @@ fn render_learnings_tab(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAre
 }
 
 fn render_sources(f: &mut Frame, app: &App, area: Rect) {
-    let block = styled_block("Sources");
+    let block = theme::styled_block("Sources");
     let inner = block.inner(area);
     f.render_widget(block, area);
     let items: Vec<ListItem> = app.source_counts.iter().map(|(name, count)| {
         ListItem::new(Line::from(vec![
-            Span::styled(format!("  {:<14}", name), DATA_STYLE),
-            Span::styled(format!("{:>6}", count), DATA_STYLE.add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {:<14}", name), theme::DATA),
+            Span::styled(format!("{:>6}", count), theme::DATA.add_modifier(Modifier::BOLD)),
         ]))
     }).collect();
     f.render_widget(List::new(items), inner);
@@ -177,12 +148,12 @@ impl Widget for RadarBar {
 }
 
 fn render_run_panel(f: &mut Frame, title: &str, runs: &[RunProgress], state: &mut ListState, area: Rect, tick: u64) {
-    let block = styled_block(title);
+    let block = theme::styled_block(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if runs.is_empty() {
-        f.render_widget(Paragraph::new(Line::from(vec![Span::styled("  all idle", LABEL_STYLE)])), inner);
+        f.render_widget(Paragraph::new(Line::from(vec![Span::styled("  all idle", theme::LABEL)])), inner);
         return;
     }
 
@@ -205,9 +176,9 @@ fn render_run_panel(f: &mut Frame, title: &str, runs: &[RunProgress], state: &mu
         if row_gauge >= rows.len() { break; }
 
         f.render_widget(Paragraph::new(Line::from(vec![
-            Span::styled("  ", LABEL_STYLE),
-            Span::styled(&label_text, GREEN_STYLE),
-            Span::styled(status_str, LABEL_STYLE),
+            Span::styled("  ", theme::LABEL),
+            Span::styled(&label_text, theme::SUCCESS),
+            Span::styled(status_str, theme::LABEL),
         ])), rows[row_label]);
 
         let gauge_area = Rect { x: rows[row_gauge].x + 2, width: rows[row_gauge].width.saturating_sub(4), ..rows[row_gauge] };
@@ -226,20 +197,20 @@ fn render_run_panel(f: &mut Frame, title: &str, runs: &[RunProgress], state: &mu
 }
 
 fn render_agents(f: &mut Frame, app: &App, area: Rect) {
-    let block = styled_block("Agents");
+    let block = theme::styled_block("Agents");
     let inner = block.inner(area);
     f.render_widget(block, area);
     let items: Vec<ListItem> = app.agent_counts.iter().map(|(name, count)| {
         ListItem::new(Line::from(vec![
-            Span::styled(format!("  {:<18}", name), DATA_STYLE),
-            Span::styled(format!("{:>5}", count), DATA_STYLE.add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {:<18}", name), theme::DATA),
+            Span::styled(format!("{:>5}", count), theme::DATA.add_modifier(Modifier::BOLD)),
         ]))
     }).collect();
     f.render_widget(List::new(items), inner);
 }
 
 fn render_recent_learnings(f: &mut Frame, app: &mut App, area: Rect) {
-    let block = styled_block("Recent Learnings");
+    let block = theme::styled_block("Recent Learnings");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -252,13 +223,13 @@ fn render_recent_learnings(f: &mut Frame, app: &mut App, area: Rect) {
             format!("{}...", l.learning.chars().take(max_learning_chars - 3).collect::<String>())
         } else { l.learning.clone() };
         ListItem::new(Line::from(vec![
-            Span::styled(format!(" {} ", l.processed_at), LABEL_STYLE),
+            Span::styled(format!(" {} ", l.processed_at), theme::LABEL),
             Span::styled(format!("{}: ", l.agent), Style::default().fg(Color::Cyan)),
-            Span::styled(learning_display, DATA_STYLE),
+            Span::styled(learning_display, theme::DATA),
         ]))
     }).collect();
 
-    f.render_stateful_widget(List::new(items).highlight_style(HIGHLIGHT_STYLE), inner, &mut app.recent_learnings_state);
+    f.render_stateful_widget(List::new(items).highlight_style(theme::HIGHLIGHT), inner, &mut app.recent_learnings_state);
 
     let visible_lines = inner.height as usize;
     if app.recent_learnings.len() > visible_lines {
@@ -269,13 +240,13 @@ fn render_recent_learnings(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_learnings_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(vec![
-        Span::styled("  Total: ", LABEL_STYLE),
-        Span::styled(format!("{}", app.total_learnings), DATA_STYLE),
-        Span::styled("  DB: ", LABEL_STYLE),
-        Span::styled(app.format_db_size(), DATA_STYLE),
-        Span::styled("  Updated: ", LABEL_STYLE),
-        Span::styled(&app.last_refresh, DATA_STYLE),
-        Span::styled("  |  q: quit  r: refresh  Tab: switch  scroll: mouse", LABEL_STYLE),
+        Span::styled("  Total: ", theme::LABEL),
+        Span::styled(format!("{}", app.total_learnings), theme::DATA),
+        Span::styled("  DB: ", theme::LABEL),
+        Span::styled(app.format_db_size(), theme::DATA),
+        Span::styled("  Updated: ", theme::LABEL),
+        Span::styled(&app.last_refresh, theme::DATA),
+        Span::styled("  |  q: quit  r: refresh  Tab: switch  scroll: mouse", theme::LABEL),
     ])), area);
 }
 
@@ -285,7 +256,7 @@ fn render_research_tab(f: &mut Frame, app: &mut App, panel_areas: &mut PanelArea
     if app.research_db_missing {
         f.render_widget(Paragraph::new("Research DB not found. Run 'research --once' to initialize.")
             .style(Style::default().fg(Color::Yellow))
-            .block(styled_block_magenta("Research")), area);
+            .block(theme::styled_block_accent("Research", Color::Magenta)), area);
         return;
     }
 
@@ -304,30 +275,30 @@ fn render_research_tab(f: &mut Frame, app: &mut App, panel_areas: &mut PanelArea
 }
 
 fn render_research_stats(f: &mut Frame, app: &App, area: Rect) {
-    let block = styled_block_magenta("Research Stats");
+    let block = theme::styled_block_accent("Research Stats", Color::Magenta);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let s = &app.research_stats;
     f.render_widget(Paragraph::new(vec![
-        Line::from(vec![Span::styled("  Total Issues:  ", LABEL_STYLE), Span::styled(format!("{}", s.total_issues), DATA_STYLE.add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("  Open:          ", LABEL_STYLE), Span::styled(format!("{}", s.open_issues), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("  Solved:        ", LABEL_STYLE), Span::styled(format!("{}", s.solved_issues), GREEN_STYLE.add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("  Solutions:     ", LABEL_STYLE), Span::styled(format!("{}", s.total_solutions), DATA_STYLE.add_modifier(Modifier::BOLD))]),
-        Line::from(vec![Span::styled("  Pending:       ", LABEL_STYLE), Span::styled(format!("{}", s.pending_digest), MAGENTA_STYLE)]),
+        Line::from(vec![Span::styled("  Total Issues:  ", theme::LABEL), Span::styled(format!("{}", s.total_issues), theme::DATA.add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled("  Open:          ", theme::LABEL), Span::styled(format!("{}", s.open_issues), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled("  Solved:        ", theme::LABEL), Span::styled(format!("{}", s.solved_issues), theme::SUCCESS.add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled("  Solutions:     ", theme::LABEL), Span::styled(format!("{}", s.total_solutions), theme::DATA.add_modifier(Modifier::BOLD))]),
+        Line::from(vec![Span::styled("  Pending:       ", theme::LABEL), Span::styled(format!("{}", s.pending_digest), theme::MAGENTA)]),
         Line::from(vec![]),
-        Line::from(vec![Span::styled("  Last Scan:     ", LABEL_STYLE), Span::styled(&s.last_scan_at, DATA_STYLE)]),
-        Line::from(vec![Span::styled("  Last Digest:   ", LABEL_STYLE), Span::styled(&s.last_digest_at, DATA_STYLE)]),
+        Line::from(vec![Span::styled("  Last Scan:     ", theme::LABEL), Span::styled(&s.last_scan_at, theme::DATA)]),
+        Line::from(vec![Span::styled("  Last Digest:   ", theme::LABEL), Span::styled(&s.last_digest_at, theme::DATA)]),
     ]), inner);
 }
 
 fn render_research_issues(f: &mut Frame, app: &mut App, area: Rect) {
-    let block = styled_block_magenta("Recent Issues");
+    let block = theme::styled_block_accent("Recent Issues", Color::Magenta);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if app.research_issues.is_empty() {
-        f.render_widget(Paragraph::new(Line::from(vec![Span::styled("  No issues detected yet", LABEL_STYLE)])), inner);
+        f.render_widget(Paragraph::new(Line::from(vec![Span::styled("  No issues detected yet", theme::LABEL)])), inner);
         return;
     }
 
@@ -339,12 +310,12 @@ fn render_research_issues(f: &mut Frame, app: &mut App, area: Rect) {
         let icon = match issue.severity.as_str() {
             "critical" | "high" => Span::styled(" ! ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             "medium" => Span::styled(" * ", Style::default().fg(Color::Yellow)),
-            _ => Span::styled(" . ", GREEN_STYLE),
+            _ => Span::styled(" . ", theme::SUCCESS),
         };
         let status_style = match issue.status.as_str() {
-            "solved" => GREEN_STYLE,
+            "solved" => theme::SUCCESS,
             "researching" => Style::default().fg(Color::Yellow),
-            _ => DATA_STYLE,
+            _ => theme::DATA,
         };
         let title_display = if issue.title.chars().count() > max_title_chars && max_title_chars > 3 {
             format!("{}...", issue.title.chars().take(max_title_chars - 3).collect::<String>())
@@ -353,11 +324,11 @@ fn render_research_issues(f: &mut Frame, app: &mut App, area: Rect) {
         ListItem::new(Line::from(vec![
             icon,
             Span::styled(format!("[{}] ", &issue.status[..3.min(issue.status.len())]), status_style),
-            Span::styled(title_display, DATA_STYLE),
+            Span::styled(title_display, theme::DATA),
         ]))
     }).collect();
 
-    f.render_stateful_widget(List::new(items).highlight_style(HIGHLIGHT_STYLE), inner, &mut app.research_issues_state);
+    f.render_stateful_widget(List::new(items).highlight_style(theme::HIGHLIGHT), inner, &mut app.research_issues_state);
 
     if app.research_issues.len() > inner.height as usize {
         let mut ss = ScrollbarState::new(app.research_issues.len()).position(app.research_issues_state.selected().unwrap_or(0));
@@ -366,12 +337,12 @@ fn render_research_issues(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_research_solutions(f: &mut Frame, app: &mut App, area: Rect) {
-    let block = styled_block_magenta("Recent Solutions");
+    let block = theme::styled_block_accent("Recent Solutions", Color::Magenta);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if app.research_solutions.is_empty() {
-        f.render_widget(Paragraph::new(Line::from(vec![Span::styled("  No solutions found yet", LABEL_STYLE)])), inner);
+        f.render_widget(Paragraph::new(Line::from(vec![Span::styled("  No solutions found yet", theme::LABEL)])), inner);
         return;
     }
 
@@ -381,7 +352,7 @@ fn render_research_solutions(f: &mut Frame, app: &mut App, area: Rect) {
 
     let items: Vec<ListItem> = app.research_solutions.iter().map(|sol| {
         let conf_style = match sol.confidence.as_str() {
-            "high" => GREEN_STYLE,
+            "high" => theme::SUCCESS,
             "medium" => Style::default().fg(Color::Yellow),
             _ => Style::default().fg(Color::Red),
         };
@@ -391,14 +362,14 @@ fn render_research_solutions(f: &mut Frame, app: &mut App, area: Rect) {
         } else { sol.summary.clone() };
 
         ListItem::new(Line::from(vec![
-            Span::styled(format!(" {} ", sol.created_at), LABEL_STYLE),
+            Span::styled(format!(" {} ", sol.created_at), theme::LABEL),
             Span::styled(format!("[{}] ", &sol.confidence[..3.min(sol.confidence.len())]), conf_style),
-            Span::styled(format!("{} -> ", issue_short), MAGENTA_STYLE),
-            Span::styled(summary_display, DATA_STYLE),
+            Span::styled(format!("{} -> ", issue_short), theme::MAGENTA),
+            Span::styled(summary_display, theme::DATA),
         ]))
     }).collect();
 
-    f.render_stateful_widget(List::new(items).highlight_style(HIGHLIGHT_STYLE), inner, &mut app.research_solutions_state);
+    f.render_stateful_widget(List::new(items).highlight_style(theme::HIGHLIGHT), inner, &mut app.research_solutions_state);
 
     if app.research_solutions.len() > inner.height as usize {
         let mut ss = ScrollbarState::new(app.research_solutions.len()).position(app.research_solutions_state.selected().unwrap_or(0));
@@ -408,14 +379,14 @@ fn render_research_solutions(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_research_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(vec![
-        Span::styled("  Issues: ", LABEL_STYLE),
-        Span::styled(format!("{}", app.research_stats.total_issues), DATA_STYLE),
-        Span::styled("  Solutions: ", LABEL_STYLE),
-        Span::styled(format!("{}", app.research_stats.total_solutions), DATA_STYLE),
-        Span::styled("  DB: ", LABEL_STYLE),
-        Span::styled(app.format_research_db_size(), DATA_STYLE),
-        Span::styled("  Updated: ", LABEL_STYLE),
-        Span::styled(&app.last_refresh, DATA_STYLE),
-        Span::styled("  |  q: quit  r: refresh  Tab: switch  scroll: mouse", LABEL_STYLE),
+        Span::styled("  Issues: ", theme::LABEL),
+        Span::styled(format!("{}", app.research_stats.total_issues), theme::DATA),
+        Span::styled("  Solutions: ", theme::LABEL),
+        Span::styled(format!("{}", app.research_stats.total_solutions), theme::DATA),
+        Span::styled("  DB: ", theme::LABEL),
+        Span::styled(app.format_research_db_size(), theme::DATA),
+        Span::styled("  Updated: ", theme::LABEL),
+        Span::styled(&app.last_refresh, theme::DATA),
+        Span::styled("  |  q: quit  r: refresh  Tab: switch  scroll: mouse", theme::LABEL),
     ])), area);
 }
