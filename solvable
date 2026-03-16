@@ -61,12 +61,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TUI_BIN = os.path.join(SCRIPT_DIR, "learner-tui", "target", "release", "solvable")
 LEARN_SCRIPT = os.path.join(SCRIPT_DIR, "learn")
 
-# Research script lives in the researcher workspace (sibling directory in openclaw)
+# Research script lives in the researcher workspace (sibling directory)
 _researcher_candidates = [
     os.path.join(SCRIPT_DIR, "..", "workspace-researcher-agent", "research"),
-    os.path.expanduser("~/.openclaw/workspace-researcher-agent/research"),
+    os.path.join(SCRIPT_DIR, "research"),
 ]
-RESEARCH_SCRIPT = next((p for p in _researcher_candidates if os.path.exists(p)), _researcher_candidates[-1])
+RESEARCH_SCRIPT = next((p for p in _researcher_candidates if os.path.exists(p)), _researcher_candidates[0])
 
 
 def main():
