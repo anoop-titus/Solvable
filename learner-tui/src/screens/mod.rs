@@ -2,3 +2,8 @@ pub mod welcome;
 pub mod portal;
 pub mod learnings;
 pub mod research;
+pub mod issues;
+pub mod solutions;
+pub mod confluence;
+pub mod solve;
+pub mod settings;

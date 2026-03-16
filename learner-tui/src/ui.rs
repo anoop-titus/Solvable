@@ -60,16 +60,20 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas, tab_ba
     render_tab_bar(f, app, main_layout[0], tab_bar_state);
 
     match app.current_tab {
-        Tab::Learnings => crate::screens::learnings::render(f, app, panel_areas, main_layout[1]),
-        Tab::Research => crate::screens::research::render(f, app, panel_areas, main_layout[1]),
-        Tab::Portal => crate::screens::portal::render(f, &mut app.portal, main_layout[1]),
-        _ => render_stub_tab(f, app.current_tab, main_layout[1]),
+        Tab::Learnings   => screens::learnings::render(f, app, panel_areas, main_layout[1]),
+        Tab::Research    => screens::research::render(f, app, panel_areas, main_layout[1]),
+        Tab::Portal      => screens::portal::render(f, &mut app.portal, main_layout[1]),
+        Tab::Issues      => screens::issues::render(f, main_layout[1]),
+        Tab::Solutions   => screens::solutions::render(f, main_layout[1]),
+        Tab::Confluence  => screens::confluence::render(f, main_layout[1]),
+        Tab::Solve       => screens::solve::render(f, main_layout[1]),
+        Tab::Settings    => screens::settings::render(f, main_layout[1]),
     }
 
     match app.current_tab {
-        Tab::Learnings => crate::screens::learnings::render_footer(f, app, main_layout[2]),
-        Tab::Research => crate::screens::research::render_footer(f, app, main_layout[2]),
-        _ => render_stub_footer(f, app, main_layout[2]),
+        Tab::Learnings => screens::learnings::render_footer(f, app, main_layout[2]),
+        Tab::Research  => screens::research::render_footer(f, app, main_layout[2]),
+        _              => render_stub_footer(f, app, main_layout[2]),
     }
 }
 
@@ -95,17 +99,7 @@ fn render_tab_bar(f: &mut Frame, app: &App, area: Rect, tab_bar_state: &mut TabB
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-// ──────────────── STUB TABS ────────────────
-
-fn render_stub_tab(f: &mut Frame, tab: Tab, area: Rect) {
-    let msg = format!("  {} \u{2014} Coming soon", tab.label());
-    f.render_widget(
-        Paragraph::new(msg)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(theme::styled_block(tab.label())),
-        area,
-    );
-}
+// ──────────────── SHARED FOOTER ────────────────
 
 fn render_stub_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(vec![
