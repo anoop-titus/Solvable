@@ -17,8 +17,9 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{App, Screen, Tab};
+use app::{App, IssueFocus, Screen, Tab};
 use io_layer::oauth::{self, OAuthProvider, OAuthStatus, DeviceFlowState};
+use screens::settings::SettingsAction;
 use ui::PanelAreas;
 use widgets::tab_bar::TabBarState;
 
@@ -246,6 +247,223 @@ fn main() -> io::Result<()> {
                         }
                     }
 
+                    // Issues tab captures input for focus navigation and filter dropdowns
+                    if app.current_tab == Tab::Issues {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Left => {
+                                // Move focus area left: Detail -> List -> Filters
+                                match app.issues_state.focus {
+                                    IssueFocus::Detail => app.issues_state.focus = IssueFocus::List,
+                                    IssueFocus::List => app.issues_state.focus = IssueFocus::Filters,
+                                    IssueFocus::Filters => {} // already leftmost
+                                }
+                            }
+                            KeyCode::Right => {
+                                // Move focus area right: Filters -> List -> Detail
+                                match app.issues_state.focus {
+                                    IssueFocus::Filters => {
+                                        app.issues_state.collapse_all_dropdowns();
+                                        app.issues_state.focus = IssueFocus::List;
+                                    }
+                                    IssueFocus::List => app.issues_state.focus = IssueFocus::Detail,
+                                    IssueFocus::Detail => {} // already rightmost
+                                }
+                            }
+                            KeyCode::Up => {
+                                match app.issues_state.focus {
+                                    IssueFocus::Filters => {
+                                        if app.issues_state.any_dropdown_expanded() {
+                                            app.issues_state.active_dropdown_mut().select_prev();
+                                        } else {
+                                            // Move between filter dropdowns
+                                            if app.issues_state.active_filter > 0 {
+                                                app.issues_state.active_filter -= 1;
+                                            }
+                                        }
+                                    }
+                                    IssueFocus::List => {
+                                        app.issues_state.scroll_list(-1);
+                                    }
+                                    IssueFocus::Detail => {
+                                        app.issues_state.detail_scroll = app.issues_state.detail_scroll.saturating_sub(1);
+                                    }
+                                }
+                            }
+                            KeyCode::Down => {
+                                match app.issues_state.focus {
+                                    IssueFocus::Filters => {
+                                        if app.issues_state.any_dropdown_expanded() {
+                                            app.issues_state.active_dropdown_mut().select_next();
+                                        } else {
+                                            if app.issues_state.active_filter < 2 {
+                                                app.issues_state.active_filter += 1;
+                                            }
+                                        }
+                                    }
+                                    IssueFocus::List => {
+                                        app.issues_state.scroll_list(1);
+                                    }
+                                    IssueFocus::Detail => {
+                                        app.issues_state.detail_scroll += 1;
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                match app.issues_state.focus {
+                                    IssueFocus::Filters => {
+                                        let dd = app.issues_state.active_dropdown_mut();
+                                        if dd.expanded {
+                                            dd.expanded = false;
+                                            // Re-apply filters after selection
+                                            app.issues_state.apply_filters();
+                                        } else {
+                                            dd.toggle();
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if app.issues_state.any_dropdown_expanded() {
+                                    app.issues_state.collapse_all_dropdowns();
+                                }
+                            }
+                            _ => { handled = false; }
+                        }
+
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
+                    // Solutions tab captures input for list navigation
+                    if app.current_tab == Tab::Solutions {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Up => {
+                                app.solutions_state.scroll_list(-1);
+                            }
+                            KeyCode::Down => {
+                                app.solutions_state.scroll_list(1);
+                            }
+                            _ => { handled = false; }
+                        }
+
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
+                    // Settings tab captures input for sliders and buttons
+                    if app.current_tab == Tab::Settings {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Tab => {
+                                app.settings.advance_focus();
+                            }
+                            KeyCode::BackTab => {
+                                app.settings.retreat_focus();
+                            }
+                            KeyCode::Enter => {
+                                if let Some(action) = app.settings.focused_action() {
+                                    match action {
+                                        SettingsAction::Refresh => {
+                                            app.settings.refresh_sysinfo();
+                                            app.settings.status_message = Some(("System info refreshed".to_string(), true));
+                                            app.settings.status_tick = app.tick_count;
+                                        }
+                                        SettingsAction::SaveSysinfo => {
+                                            match app.settings.save_sysinfo() {
+                                                Ok(_) => {
+                                                    app.settings.status_message = Some(("Sysinfo saved to file".to_string(), true));
+                                                }
+                                                Err(e) => {
+                                                    app.settings.status_message = Some((format!("Save error: {}", e), false));
+                                                }
+                                            }
+                                            app.settings.status_tick = app.tick_count;
+                                        }
+                                        SettingsAction::SaveAll => {
+                                            match app.settings.save_params() {
+                                                Ok(_) => {
+                                                    app.settings.status_message = Some(("Pipeline params saved".to_string(), true));
+                                                }
+                                                Err(e) => {
+                                                    app.settings.status_message = Some((format!("Save error: {}", e), false));
+                                                }
+                                            }
+                                            app.settings.status_tick = app.tick_count;
+                                        }
+                                        SettingsAction::ResetDefaults => {
+                                            app.settings.reset_defaults();
+                                            app.settings.status_message = Some(("Reset to defaults".to_string(), true));
+                                            app.settings.status_tick = app.tick_count;
+                                        }
+                                        SettingsAction::ToggleEdit => {
+                                            if let Some(slider) = app.settings.focused_slider_mut() {
+                                                if slider.editing_number {
+                                                    slider.commit_edit();
+                                                } else {
+                                                    slider.start_editing();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if let Some(slider) = app.settings.focused_slider_mut() {
+                                    if slider.editing_number {
+                                        slider.cancel_edit();
+                                    }
+                                }
+                            }
+                            KeyCode::Left => {
+                                if app.settings.has_focused_slider() && !app.settings.has_focused_input() {
+                                    if let Some(slider) = app.settings.focused_slider_mut() {
+                                        slider.decrement();
+                                    }
+                                } else {
+                                    handled = false;
+                                }
+                            }
+                            KeyCode::Right => {
+                                if app.settings.has_focused_slider() && !app.settings.has_focused_input() {
+                                    if let Some(slider) = app.settings.focused_slider_mut() {
+                                        slider.increment();
+                                    }
+                                } else {
+                                    handled = false;
+                                }
+                            }
+                            KeyCode::Char(c) if app.settings.has_focused_input() => {
+                                if let Some(slider) = app.settings.focused_slider_mut() {
+                                    slider.type_char(c);
+                                }
+                            }
+                            KeyCode::Backspace if app.settings.has_focused_input() => {
+                                if let Some(slider) = app.settings.focused_slider_mut() {
+                                    slider.backspace();
+                                }
+                            }
+                            _ => { handled = false; }
+                        }
+
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+
+                        // Guard: don't let 'q' quit when editing a number
+                        if app.settings.has_focused_input() {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -323,6 +541,13 @@ fn main() -> io::Result<()> {
                                         app.scroll_research_solutions(delta);
                                     }
                                 }
+                                Tab::Issues => {
+                                    // Scroll issue list regardless of mouse position
+                                    app.issues_state.scroll_list(delta);
+                                }
+                                Tab::Solutions => {
+                                    app.solutions_state.scroll_list(delta);
+                                }
                                 _ => {} // stub tabs have no scrollable content yet
                             }
                             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
@@ -330,6 +555,52 @@ fn main() -> io::Result<()> {
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                             if let Some(tab) = tab_bar_state.hit_test(mouse.column, mouse.row) {
                                 app.set_tab(tab);
+                            }
+                            // Settings tab click handling
+                            if app.current_tab == Tab::Settings {
+                                let clicked = app.settings.handle_click(mouse.column, mouse.row);
+                                if clicked {
+                                    // If a button was clicked, execute its action
+                                    if let Some(action) = app.settings.focused_action() {
+                                        match action {
+                                            SettingsAction::Refresh => {
+                                                app.settings.refresh_sysinfo();
+                                                app.settings.status_message = Some(("System info refreshed".to_string(), true));
+                                                app.settings.status_tick = app.tick_count;
+                                            }
+                                            SettingsAction::SaveSysinfo => {
+                                                match app.settings.save_sysinfo() {
+                                                    Ok(_) => {
+                                                        app.settings.status_message = Some(("Sysinfo saved".to_string(), true));
+                                                    }
+                                                    Err(e) => {
+                                                        app.settings.status_message = Some((format!("Error: {}", e), false));
+                                                    }
+                                                }
+                                                app.settings.status_tick = app.tick_count;
+                                            }
+                                            SettingsAction::SaveAll => {
+                                                match app.settings.save_params() {
+                                                    Ok(_) => {
+                                                        app.settings.status_message = Some(("Pipeline params saved".to_string(), true));
+                                                    }
+                                                    Err(e) => {
+                                                        app.settings.status_message = Some((format!("Error: {}", e), false));
+                                                    }
+                                                }
+                                                app.settings.status_tick = app.tick_count;
+                                            }
+                                            SettingsAction::ResetDefaults => {
+                                                app.settings.reset_defaults();
+                                                app.settings.status_message = Some(("Reset to defaults".to_string(), true));
+                                                app.settings.status_tick = app.tick_count;
+                                            }
+                                            SettingsAction::ToggleEdit => {
+                                                // Click on slider bar sets value, don't toggle edit
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                         }

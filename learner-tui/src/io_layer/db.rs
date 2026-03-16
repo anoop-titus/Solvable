@@ -61,6 +61,285 @@ impl Default for ResearchStats {
     }
 }
 
+// ──────────────── Issues Tab (detailed) ────────────────
+
+pub struct IssueDetail {
+    pub id: u64,
+    pub title: String,
+    pub description: String,
+    pub category: String,
+    pub severity: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub solution_count: u64,
+    pub cluster_name: Option<String>,
+}
+
+pub struct IssueStats {
+    pub total: u64,
+    pub by_severity: Vec<(String, u64)>,
+    pub by_status: Vec<(String, u64)>,
+    pub by_category: Vec<(String, u64)>,
+}
+
+impl Default for IssueStats {
+    fn default() -> Self {
+        Self {
+            total: 0,
+            by_severity: Vec::new(),
+            by_status: Vec::new(),
+            by_category: Vec::new(),
+        }
+    }
+}
+
+pub struct IssuesDetailedData {
+    pub issues: Vec<IssueDetail>,
+    pub stats: IssueStats,
+}
+
+/// Query research.db (and optionally mesh.db) for the full Issues tab view.
+pub fn fetch_issues_detailed(research_db: &str, mesh_db: Option<&str>) -> Option<IssuesDetailedData> {
+    let db_file = Path::new(research_db);
+    if !db_file.exists() {
+        return None;
+    }
+
+    let conn = Connection::open_with_flags(
+        research_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+
+    // Compute stats
+    let total: u64 = conn
+        .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    let by_severity = conn
+        .prepare("SELECT COALESCE(severity, 'unknown'), COUNT(*) FROM issues GROUP BY severity ORDER BY COUNT(*) DESC")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))
+                .and_then(|rows| rows.collect())
+        })
+        .unwrap_or_default();
+
+    let by_status = conn
+        .prepare("SELECT COALESCE(status, 'unknown'), COUNT(*) FROM issues GROUP BY status ORDER BY COUNT(*) DESC")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))
+                .and_then(|rows| rows.collect())
+        })
+        .unwrap_or_default();
+
+    let by_category = conn
+        .prepare("SELECT COALESCE(category, 'unknown'), COUNT(*) FROM issues GROUP BY category ORDER BY COUNT(*) DESC")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))
+                .and_then(|rows| rows.collect())
+        })
+        .unwrap_or_default();
+
+    let stats = IssueStats {
+        total,
+        by_severity,
+        by_status,
+        by_category,
+    };
+
+    // Load cluster mapping from mesh.db if available
+    let mut cluster_map: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    if let Some(mesh_path) = mesh_db {
+        if Path::new(mesh_path).exists() {
+            if let Ok(mesh_conn) = Connection::open_with_flags(
+                mesh_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ) {
+                if let Ok(mut stmt) = mesh_conn.prepare("SELECT id, name, member_ids FROM issue_clusters") {
+                    if let Ok(rows) = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    }) {
+                        for row in rows.flatten() {
+                            let (cluster_name, member_ids_json) = row;
+                            // member_ids is a JSON array of issue IDs
+                            if let Ok(ids) = serde_json::from_str::<Vec<u64>>(&member_ids_json) {
+                                for id in ids {
+                                    cluster_map.insert(id, cluster_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fetch all issues with solution counts
+    let issues = conn
+        .prepare(
+            "SELECT i.id, i.title, COALESCE(i.description, ''), COALESCE(i.category, ''), \
+             COALESCE(i.severity, ''), COALESCE(i.status, ''), COALESCE(i.created_at, ''), \
+             COALESCE(i.updated_at, ''), \
+             (SELECT COUNT(*) FROM solutions s WHERE s.issue_id = i.id) as sol_count \
+             FROM issues i ORDER BY i.id DESC",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| {
+                let id: u64 = row.get(0)?;
+                let created_at: String = row.get(6)?;
+                let display_created = if created_at.len() >= 16 {
+                    created_at[..16].to_string()
+                } else {
+                    created_at
+                };
+                let updated_at: String = row.get(7)?;
+                let display_updated = if updated_at.len() >= 16 {
+                    updated_at[..16].to_string()
+                } else {
+                    updated_at
+                };
+                Ok((id, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?, row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?, display_created, display_updated,
+                    row.get::<_, u64>(8)?))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        })
+        .unwrap_or_default();
+
+    let issue_details: Vec<IssueDetail> = issues
+        .into_iter()
+        .map(|(id, title, description, category, severity, status, created_at, updated_at, solution_count)| {
+            let cluster_name = cluster_map.get(&id).cloned();
+            IssueDetail {
+                id,
+                title,
+                description,
+                category,
+                severity,
+                status,
+                created_at,
+                updated_at,
+                solution_count,
+                cluster_name,
+            }
+        })
+        .collect();
+
+    Some(IssuesDetailedData {
+        issues: issue_details,
+        stats,
+    })
+}
+
+// ──────────────── Solutions Tab (detailed) ────────────────
+
+pub struct SolutionDetail {
+    pub id: u64,
+    pub issue_id: u64,
+    pub issue_title: String,
+    pub summary: String,
+    pub source_url: String,
+    pub source_title: String,
+    pub confidence: String,
+    pub created_at: String,
+    pub issue_severity: String,
+    pub issue_status: String,
+}
+
+pub struct SolutionStats {
+    pub total: u64,
+    pub by_confidence: Vec<(String, u64)>,
+}
+
+impl Default for SolutionStats {
+    fn default() -> Self {
+        Self {
+            total: 0,
+            by_confidence: Vec::new(),
+        }
+    }
+}
+
+pub struct SolutionsDetailedData {
+    pub solutions: Vec<SolutionDetail>,
+    pub stats: SolutionStats,
+}
+
+/// Query research.db for the full Solutions tab view.
+pub fn fetch_solutions_detailed(research_db: &str) -> Option<SolutionsDetailedData> {
+    let db_file = Path::new(research_db);
+    if !db_file.exists() {
+        return None;
+    }
+
+    let conn = Connection::open_with_flags(
+        research_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+
+    let total: u64 = conn
+        .query_row("SELECT COUNT(*) FROM solutions", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    let by_confidence = conn
+        .prepare("SELECT COALESCE(confidence, 'unknown'), COUNT(*) FROM solutions GROUP BY confidence ORDER BY COUNT(*) DESC")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))
+                .and_then(|rows| rows.collect())
+        })
+        .unwrap_or_default();
+
+    let stats = SolutionStats {
+        total,
+        by_confidence,
+    };
+
+    let solutions = conn
+        .prepare(
+            "SELECT s.id, s.issue_id, COALESCE(i.title, ''), COALESCE(s.summary, ''), \
+             COALESCE(s.source_url, ''), COALESCE(s.source_title, ''), \
+             COALESCE(s.confidence, ''), COALESCE(s.created_at, ''), \
+             COALESCE(i.severity, ''), COALESCE(i.status, '') \
+             FROM solutions s JOIN issues i ON s.issue_id = i.id \
+             ORDER BY s.id DESC",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| {
+                let created_at: String = row.get(7)?;
+                let display_created = if created_at.len() >= 16 {
+                    created_at[..16].to_string()
+                } else {
+                    created_at
+                };
+                Ok(SolutionDetail {
+                    id: row.get(0)?,
+                    issue_id: row.get(1)?,
+                    issue_title: row.get(2)?,
+                    summary: row.get(3)?,
+                    source_url: row.get(4)?,
+                    source_title: row.get(5)?,
+                    confidence: row.get(6)?,
+                    created_at: display_created,
+                    issue_severity: row.get(8)?,
+                    issue_status: row.get(9)?,
+                })
+            })
+            .and_then(|rows| rows.collect())
+        })
+        .unwrap_or_default();
+
+    Some(SolutionsDetailedData {
+        solutions,
+        stats,
+    })
+}
+
 pub struct LearningsData {
     pub source_counts: Vec<(String, u64)>,
     pub agent_counts: Vec<(String, u64)>,

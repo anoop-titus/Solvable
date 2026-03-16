@@ -63,16 +63,19 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas, tab_ba
         Tab::Learnings   => screens::learnings::render(f, app, panel_areas, main_layout[1]),
         Tab::Research    => screens::research::render(f, app, panel_areas, main_layout[1]),
         Tab::Portal      => screens::portal::render(f, &mut app.portal, main_layout[1]),
-        Tab::Issues      => screens::issues::render(f, main_layout[1]),
-        Tab::Solutions   => screens::solutions::render(f, main_layout[1]),
+        Tab::Issues      => screens::issues::render(f, app, main_layout[1]),
+        Tab::Solutions   => screens::solutions::render(f, app, main_layout[1]),
         Tab::Confluence  => screens::confluence::render(f, main_layout[1]),
         Tab::Solve       => screens::solve::render(f, main_layout[1]),
-        Tab::Settings    => screens::settings::render(f, main_layout[1]),
+        Tab::Settings    => screens::settings::render(f, &mut app.settings, main_layout[1]),
     }
 
     match app.current_tab {
         Tab::Learnings => screens::learnings::render_footer(f, app, main_layout[2]),
         Tab::Research  => screens::research::render_footer(f, app, main_layout[2]),
+        Tab::Issues    => screens::issues::render_footer(f, app, main_layout[2]),
+        Tab::Solutions => screens::solutions::render_footer(f, app, main_layout[2]),
+        Tab::Settings  => screens::settings::render_footer(f, &app.settings, main_layout[2]),
         _              => render_stub_footer(f, app, main_layout[2]),
     }
 }

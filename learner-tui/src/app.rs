@@ -2,10 +2,12 @@ use chrono::Local;
 use ratatui::widgets::ListState;
 
 use crate::io_layer::db::{
-    self, RecentLearning, ResearchIssue, ResearchSolution, ResearchStats, RunProgress,
+    self, IssueDetail, IssueStats, RecentLearning, ResearchIssue,
+    ResearchSolution, ResearchStats, RunProgress, SolutionDetail, SolutionStats,
 };
 use crate::io_layer::env_store;
 use crate::screens::portal::PortalState;
+use crate::screens::settings::SettingsState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -52,6 +54,209 @@ impl Tab {
     }
 }
 
+// ──────────────── Issues Tab State ────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueFocus {
+    Filters,
+    List,
+    Detail,
+}
+
+pub struct DropdownFilter {
+    pub label: String,
+    pub options: Vec<String>,
+    pub selected_index: usize,
+    pub expanded: bool,
+}
+
+impl DropdownFilter {
+    pub fn new(label: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            options: vec!["All".to_string()],
+            selected_index: 0,
+            expanded: false,
+        }
+    }
+
+    pub fn selected_value(&self) -> &str {
+        self.options.get(self.selected_index).map(|s| s.as_str()).unwrap_or("All")
+    }
+
+    pub fn toggle(&mut self) {
+        self.expanded = !self.expanded;
+    }
+
+    pub fn select_next(&mut self) {
+        if self.selected_index + 1 < self.options.len() {
+            self.selected_index += 1;
+        }
+    }
+
+    pub fn select_prev(&mut self) {
+        self.selected_index = self.selected_index.saturating_sub(1);
+    }
+
+    pub fn set_options(&mut self, values: &[(String, u64)]) {
+        self.options = vec!["All".to_string()];
+        for (val, _count) in values {
+            self.options.push(val.clone());
+        }
+        // Reset selection if out of bounds
+        if self.selected_index >= self.options.len() {
+            self.selected_index = 0;
+        }
+    }
+}
+
+pub struct IssuesState {
+    pub issues: Vec<IssueDetail>,
+    pub stats: IssueStats,
+    pub filtered_indices: Vec<usize>,
+    pub selected_index: usize,
+    pub severity_filter: DropdownFilter,
+    pub status_filter: DropdownFilter,
+    pub category_filter: DropdownFilter,
+    pub list_state: ListState,
+    pub detail_scroll: u16,
+    pub focus: IssueFocus,
+    pub active_filter: usize, // 0=severity, 1=status, 2=category
+    pub loaded: bool,
+}
+
+impl Default for IssuesState {
+    fn default() -> Self {
+        Self {
+            issues: Vec::new(),
+            stats: IssueStats::default(),
+            filtered_indices: Vec::new(),
+            selected_index: 0,
+            severity_filter: DropdownFilter::new("Severity"),
+            status_filter: DropdownFilter::new("Status"),
+            category_filter: DropdownFilter::new("Category"),
+            list_state: ListState::default(),
+            detail_scroll: 0,
+            focus: IssueFocus::List,
+            active_filter: 0,
+            loaded: false,
+        }
+    }
+}
+
+impl IssuesState {
+    pub fn apply_filters(&mut self) {
+        let sev = self.severity_filter.selected_value().to_string();
+        let sta = self.status_filter.selected_value().to_string();
+        let cat = self.category_filter.selected_value().to_string();
+
+        self.filtered_indices = self.issues.iter().enumerate()
+            .filter(|(_, issue)| {
+                (sev == "All" || issue.severity == sev)
+                    && (sta == "All" || issue.status == sta)
+                    && (cat == "All" || issue.category == cat)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        // Reset selection
+        if self.filtered_indices.is_empty() {
+            self.selected_index = 0;
+            self.list_state.select(None);
+        } else {
+            self.selected_index = 0;
+            self.list_state.select(Some(0));
+        }
+        self.detail_scroll = 0;
+    }
+
+    pub fn scroll_list(&mut self, delta: i32) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+        let max = self.filtered_indices.len().saturating_sub(1);
+        let current = self.selected_index;
+        let new_pos = if delta > 0 {
+            (current + delta as usize).min(max)
+        } else {
+            current.saturating_sub((-delta) as usize)
+        };
+        self.selected_index = new_pos;
+        self.list_state.select(Some(new_pos));
+        self.detail_scroll = 0;
+    }
+
+    pub fn selected_issue(&self) -> Option<&IssueDetail> {
+        self.filtered_indices
+            .get(self.selected_index)
+            .and_then(|&idx| self.issues.get(idx))
+    }
+
+    pub fn active_dropdown_mut(&mut self) -> &mut DropdownFilter {
+        match self.active_filter {
+            0 => &mut self.severity_filter,
+            1 => &mut self.status_filter,
+            _ => &mut self.category_filter,
+        }
+    }
+
+    pub fn any_dropdown_expanded(&self) -> bool {
+        self.severity_filter.expanded || self.status_filter.expanded || self.category_filter.expanded
+    }
+
+    pub fn collapse_all_dropdowns(&mut self) {
+        self.severity_filter.expanded = false;
+        self.status_filter.expanded = false;
+        self.category_filter.expanded = false;
+    }
+}
+
+// ──────────────── Solutions Tab State ────────────────
+
+pub struct SolutionsState {
+    pub solutions: Vec<SolutionDetail>,
+    pub stats: SolutionStats,
+    pub selected_index: usize,
+    pub list_state: ListState,
+    pub detail_scroll: u16,
+    pub loaded: bool,
+}
+
+impl Default for SolutionsState {
+    fn default() -> Self {
+        Self {
+            solutions: Vec::new(),
+            stats: SolutionStats::default(),
+            selected_index: 0,
+            list_state: ListState::default(),
+            detail_scroll: 0,
+            loaded: false,
+        }
+    }
+}
+
+impl SolutionsState {
+    pub fn scroll_list(&mut self, delta: i32) {
+        if self.solutions.is_empty() {
+            return;
+        }
+        let max = self.solutions.len().saturating_sub(1);
+        let current = self.selected_index;
+        let new_pos = if delta > 0 {
+            (current + delta as usize).min(max)
+        } else {
+            current.saturating_sub((-delta) as usize)
+        };
+        self.selected_index = new_pos;
+        self.list_state.select(Some(new_pos));
+        self.detail_scroll = 0;
+    }
+
+    pub fn selected_solution(&self) -> Option<&SolutionDetail> {
+        self.solutions.get(self.selected_index)
+    }
+}
+
 pub struct App {
     pub source_counts: Vec<(String, u64)>,
     pub agent_counts: Vec<(String, u64)>,
@@ -87,6 +292,15 @@ pub struct App {
     pub research_solutions_state: ListState,
     pub research_db_missing: bool,
     research_db_path: String,
+
+    // Issues tab
+    pub issues_state: IssuesState,
+
+    // Solutions tab
+    pub solutions_state: SolutionsState,
+
+    // Settings tab
+    pub settings: SettingsState,
 }
 
 impl App {
@@ -101,6 +315,11 @@ impl App {
         let mut portal = PortalState::new();
         let env_values = env_store::load(&env_path);
         portal.load_from_env(&env_values);
+
+        let settings_dir = env_path.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        let settings = SettingsState::new(&settings_dir);
 
         let mut app = Self {
             source_counts: Vec::new(),
@@ -129,6 +348,9 @@ impl App {
             research_solutions_state: ListState::default(),
             research_db_missing: false,
             research_db_path,
+            issues_state: IssuesState::default(),
+            solutions_state: SolutionsState::default(),
+            settings,
         };
         app.refresh();
         app
@@ -188,9 +410,54 @@ impl App {
         self.research_solutions_state.select(Some(new_pos));
     }
 
+    pub fn research_db_path(&self) -> &str {
+        &self.research_db_path
+    }
+
+    /// Derive mesh.db path from research.db path (same parent directory)
+    pub fn mesh_db_path(&self) -> Option<String> {
+        let p = std::path::Path::new(&self.research_db_path);
+        p.parent().map(|dir| dir.join("mesh.db").to_string_lossy().to_string())
+    }
+
+    pub fn refresh_issues(&mut self) {
+        let mesh_path = self.mesh_db_path();
+        match db::fetch_issues_detailed(&self.research_db_path, mesh_path.as_deref()) {
+            Some(data) => {
+                self.issues_state.stats = data.stats;
+                self.issues_state.severity_filter.set_options(&self.issues_state.stats.by_severity.clone());
+                self.issues_state.status_filter.set_options(&self.issues_state.stats.by_status.clone());
+                self.issues_state.category_filter.set_options(&self.issues_state.stats.by_category.clone());
+                self.issues_state.issues = data.issues;
+                self.issues_state.apply_filters();
+                self.issues_state.loaded = true;
+            }
+            None => {
+                self.issues_state.loaded = false;
+            }
+        }
+    }
+
+    pub fn refresh_solutions(&mut self) {
+        match db::fetch_solutions_detailed(&self.research_db_path) {
+            Some(data) => {
+                self.solutions_state.stats = data.stats;
+                self.solutions_state.solutions = data.solutions;
+                if !self.solutions_state.solutions.is_empty() && self.solutions_state.list_state.selected().is_none() {
+                    self.solutions_state.list_state.select(Some(0));
+                }
+                self.solutions_state.loaded = true;
+            }
+            None => {
+                self.solutions_state.loaded = false;
+            }
+        }
+    }
+
     pub fn has_focused_input(&self) -> bool {
         match self.current_tab {
             Tab::Portal => self.portal.has_focused_input(),
+            Tab::Settings => self.settings.has_focused_input(),
             _ => false,
         }
     }
@@ -198,6 +465,7 @@ impl App {
     pub fn has_focused_widget(&self) -> bool {
         match self.current_tab {
             Tab::Portal => true, // Portal always captures Tab for its focus chain
+            Tab::Settings => true, // Settings always captures Tab for its focus chain
             _ => false,
         }
     }
@@ -208,6 +476,12 @@ impl App {
         if self.portal.status_message.is_some() {
             if self.tick_count.wrapping_sub(self.portal.status_tick) > 15 {
                 self.portal.status_message = None;
+            }
+        }
+        // Clear settings status after 15 ticks (~3 seconds)
+        if self.settings.status_message.is_some() {
+            if self.tick_count.wrapping_sub(self.settings.status_tick) > 15 {
+                self.settings.status_message = None;
             }
         }
     }
