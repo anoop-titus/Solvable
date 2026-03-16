@@ -17,7 +17,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{App, ConfluenceFocus, IssueFocus, Screen, SolveStatus, Tab};
+use app::{App, ConfluenceFocus, IssueFocus, Screen, SolveFocus, SolveProgress, SolveStatus, Tab};
 use io_layer::oauth::{self, OAuthProvider, OAuthStatus, DeviceFlowState};
 use screens::settings::SettingsAction;
 use ui::PanelAreas;
@@ -421,6 +421,151 @@ fn main() -> io::Result<()> {
                         }
                     }
 
+                    // Solve tab captures input for two-column navigation and actions
+                    if app.current_tab == Tab::Solve {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Tab => {
+                                // Cycle focus: AiList -> AiActions -> HumanList -> Solved -> AiList
+                                app.solve_state.focus = match app.solve_state.focus {
+                                    SolveFocus::AiList => SolveFocus::AiActions,
+                                    SolveFocus::AiActions => SolveFocus::HumanList,
+                                    SolveFocus::HumanList => SolveFocus::Solved,
+                                    SolveFocus::Solved => SolveFocus::AiList,
+                                };
+                            }
+                            KeyCode::BackTab => {
+                                app.solve_state.focus = match app.solve_state.focus {
+                                    SolveFocus::AiList => SolveFocus::Solved,
+                                    SolveFocus::AiActions => SolveFocus::AiList,
+                                    SolveFocus::HumanList => SolveFocus::AiActions,
+                                    SolveFocus::Solved => SolveFocus::HumanList,
+                                };
+                            }
+                            KeyCode::Left => {
+                                match app.solve_state.focus {
+                                    SolveFocus::HumanList => app.solve_state.focus = SolveFocus::AiList,
+                                    SolveFocus::Solved => app.solve_state.focus = SolveFocus::AiList,
+                                    SolveFocus::AiActions => {
+                                        if app.solve_state.active_button > 0 {
+                                            app.solve_state.active_button -= 1;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            KeyCode::Right => {
+                                match app.solve_state.focus {
+                                    SolveFocus::AiList => app.solve_state.focus = SolveFocus::HumanList,
+                                    SolveFocus::Solved => app.solve_state.focus = SolveFocus::HumanList,
+                                    SolveFocus::AiActions => {
+                                        if app.solve_state.active_button < 2 {
+                                            app.solve_state.active_button += 1;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            KeyCode::Up => {
+                                match app.solve_state.focus {
+                                    SolveFocus::AiList => app.solve_state.scroll_ai(-1),
+                                    SolveFocus::HumanList => app.solve_state.scroll_human(-1),
+                                    SolveFocus::Solved => app.solve_state.scroll_solved(-1),
+                                    SolveFocus::AiActions => {
+                                        app.solve_state.focus = SolveFocus::AiList;
+                                    }
+                                }
+                            }
+                            KeyCode::Down => {
+                                match app.solve_state.focus {
+                                    SolveFocus::AiList => app.solve_state.scroll_ai(1),
+                                    SolveFocus::HumanList => app.solve_state.scroll_human(1),
+                                    SolveFocus::Solved => app.solve_state.scroll_solved(1),
+                                    SolveFocus::AiActions => {} // already at bottom
+                                }
+                            }
+                            KeyCode::Char(' ') => {
+                                match app.solve_state.focus {
+                                    SolveFocus::AiList => {
+                                        app.solve_state.toggle_ai_check();
+                                    }
+                                    SolveFocus::HumanList => {
+                                        // Set strikethrough tick before toggling
+                                        if let Some(item) = app.solve_state.human_items.get(app.solve_state.human_selected) {
+                                            if !item.strikethrough {
+                                                let tick = app.tick_count;
+                                                if let Some(item) = app.solve_state.human_items.get_mut(app.solve_state.human_selected) {
+                                                    item.strikethrough = true;
+                                                    item.strikethrough_tick = Some(tick);
+                                                }
+                                            } else {
+                                                app.solve_state.toggle_human_check();
+                                            }
+                                        }
+                                    }
+                                    _ => { handled = false; }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                match app.solve_state.focus {
+                                    SolveFocus::AiActions => {
+                                        match app.solve_state.active_button {
+                                            0 => {
+                                                // Solve
+                                                if app.solve_state.progress == SolveProgress::Idle {
+                                                    app.solve_state.start_solve(app.tick_count);
+                                                }
+                                            }
+                                            1 => {
+                                                // Transfer to Human
+                                                app.solve_state.transfer_to_human();
+                                            }
+                                            2 => {
+                                                // Dissolve
+                                                let tick = app.tick_count;
+                                                app.solve_state.dissolve_checked(tick);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    SolveFocus::AiList => {
+                                        // Enter on AI list goes to actions
+                                        app.solve_state.focus = SolveFocus::AiActions;
+                                    }
+                                    _ => { handled = false; }
+                                }
+                            }
+                            KeyCode::Char('s') => {
+                                // Quick solve shortcut
+                                if app.solve_state.progress == SolveProgress::Idle {
+                                    app.solve_state.start_solve(app.tick_count);
+                                }
+                            }
+                            KeyCode::Char('t') => {
+                                // Quick transfer shortcut
+                                app.solve_state.transfer_to_human();
+                            }
+                            KeyCode::Char('d') => {
+                                // Quick dissolve shortcut
+                                let tick = app.tick_count;
+                                app.solve_state.dissolve_checked(tick);
+                            }
+                            KeyCode::Char('a') => {
+                                // Select all AI items
+                                let all_checked = app.solve_state.ai_items.iter().all(|i| i.checked);
+                                for item in &mut app.solve_state.ai_items {
+                                    item.checked = !all_checked;
+                                }
+                            }
+                            _ => { handled = false; }
+                        }
+
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
                     // Settings tab captures input for sliders and buttons
                     if app.current_tab == Tab::Settings {
                         let mut handled = true;
@@ -617,6 +762,13 @@ fn main() -> io::Result<()> {
                                         ConfluenceFocus::Met => app.confluence_state.scroll_met(delta),
                                         ConfluenceFocus::Unmet => app.confluence_state.scroll_unmet(delta),
                                         ConfluenceFocus::Solved => app.confluence_state.scroll_solved(delta),
+                                    }
+                                }
+                                Tab::Solve => {
+                                    match app.solve_state.focus {
+                                        SolveFocus::AiList | SolveFocus::AiActions => app.solve_state.scroll_ai(delta),
+                                        SolveFocus::HumanList => app.solve_state.scroll_human(delta),
+                                        SolveFocus::Solved => app.solve_state.scroll_solved(delta),
                                     }
                                 }
                                 _ => {} // stub tabs have no scrollable content yet

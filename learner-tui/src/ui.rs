@@ -66,7 +66,7 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas, tab_ba
         Tab::Issues      => screens::issues::render(f, app, main_layout[1]),
         Tab::Solutions   => screens::solutions::render(f, app, main_layout[1]),
         Tab::Confluence  => screens::confluence::render(f, app, main_layout[1]),
-        Tab::Solve       => screens::solve::render(f, main_layout[1]),
+        Tab::Solve       => screens::solve::render(f, app, main_layout[1]),
         Tab::Settings    => screens::settings::render(f, &mut app.settings, main_layout[1]),
     }
 
@@ -76,6 +76,7 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas, tab_ba
         Tab::Issues      => screens::issues::render_footer(f, app, main_layout[2]),
         Tab::Solutions   => screens::solutions::render_footer(f, app, main_layout[2]),
         Tab::Confluence  => screens::confluence::render_footer(f, app, main_layout[2]),
+        Tab::Solve       => screens::solve::render_footer(f, app, main_layout[2]),
         Tab::Settings    => screens::settings::render_footer(f, &app.settings, main_layout[2]),
         _                => render_stub_footer(f, app, main_layout[2]),
     }

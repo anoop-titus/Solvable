@@ -2,7 +2,7 @@ use chrono::Local;
 use ratatui::widgets::ListState;
 
 use crate::io_layer::db::{
-    self, ConfluenceData, ConfluenceRecord, IssueDetail, IssueStats, Lvl2Analysis,
+    self, ConfluenceData, ConfluenceRecord, IssueDetail, IssueStats,
     RecentLearning, ResearchIssue, ResearchSolution, ResearchStats, RunProgress,
     SolvableBy, SolutionDetail, SolutionStats,
 };
