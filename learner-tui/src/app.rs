@@ -9,6 +9,8 @@ use crate::io_layer::db::{
 use crate::io_layer::env_store;
 use crate::screens::portal::PortalState;
 use crate::screens::settings::SettingsState;
+use crate::widgets::search::SearchState;
+use crate::widgets::tree::TreeState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -124,6 +126,8 @@ pub struct IssuesState {
     pub focus: IssueFocus,
     pub active_filter: usize, // 0=severity, 1=status, 2=category
     pub loaded: bool,
+    pub tree: TreeState,
+    pub search: SearchState,
 }
 
 impl Default for IssuesState {
@@ -141,6 +145,8 @@ impl Default for IssuesState {
             focus: IssueFocus::List,
             active_filter: 0,
             loaded: false,
+            tree: TreeState::default(),
+            search: SearchState::default(),
         }
     }
 }
@@ -221,6 +227,8 @@ pub struct SolutionsState {
     pub list_state: ListState,
     pub detail_scroll: u16,
     pub loaded: bool,
+    pub tree: TreeState,
+    pub search: SearchState,
 }
 
 impl Default for SolutionsState {
@@ -232,6 +240,8 @@ impl Default for SolutionsState {
             list_state: ListState::default(),
             detail_scroll: 0,
             loaded: false,
+            tree: TreeState::default(),
+            search: SearchState::default(),
         }
     }
 }
@@ -313,6 +323,9 @@ pub struct SolveState {
     pub ai_count: u64,
     pub human_count: u64,
     pub total_count: u64,
+    pub search: SearchState,
+    pub ai_tree: TreeState,
+    pub human_tree: TreeState,
 }
 
 impl Default for SolveState {
@@ -337,6 +350,9 @@ impl Default for SolveState {
             ai_count: 0,
             human_count: 0,
             total_count: 0,
+            search: SearchState::default(),
+            ai_tree: TreeState::default(),
+            human_tree: TreeState::default(),
         }
     }
 }
@@ -971,6 +987,8 @@ impl App {
                 self.issues_state.category_filter.set_options(&self.issues_state.stats.by_category.clone());
                 self.issues_state.issues = data.issues;
                 self.issues_state.apply_filters();
+                // Build tree view from issues
+                self.issues_state.tree = TreeState::from_issues(&self.issues_state.issues);
                 self.issues_state.loaded = true;
             }
             None => {
@@ -1053,6 +1071,9 @@ impl App {
                     if !self.solve_state.human_items.is_empty() {
                         self.solve_state.human_list_state.select(Some(0));
                     }
+                    // Build tree views for solve items
+                    self.solve_state.ai_tree = TreeState::from_solve_items(&self.solve_state.ai_items, "AI Solvable");
+                    self.solve_state.human_tree = TreeState::from_solve_items(&self.solve_state.human_items, "Human Solvable");
                     self.solve_state.loaded = true;
                 }
                 None => {
@@ -1070,6 +1091,8 @@ impl App {
                 if !self.solutions_state.solutions.is_empty() && self.solutions_state.list_state.selected().is_none() {
                     self.solutions_state.list_state.select(Some(0));
                 }
+                // Build tree view from solutions
+                self.solutions_state.tree = TreeState::from_solutions(&self.solutions_state.solutions);
                 self.solutions_state.loaded = true;
             }
             None => {
@@ -1082,6 +1105,16 @@ impl App {
         match self.current_tab {
             Tab::Portal => self.portal.has_focused_input(),
             Tab::Settings => self.settings.has_focused_input(),
+            _ => self.is_search_active(),
+        }
+    }
+
+    /// Check if any search bar is currently active.
+    pub fn is_search_active(&self) -> bool {
+        match self.current_tab {
+            Tab::Issues => self.issues_state.search.active,
+            Tab::Solutions => self.solutions_state.search.active,
+            Tab::Solve => self.solve_state.search.active,
             _ => false,
         }
     }

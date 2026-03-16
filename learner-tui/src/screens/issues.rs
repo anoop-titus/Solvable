@@ -11,6 +11,8 @@ use ratatui::{
 
 use crate::app::{App, IssueFocus};
 use crate::theme;
+use crate::widgets::search::{render_search_bar, render_search_results};
+use crate::widgets::tree::render_tree;
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     if app.research_db_missing || !app.issues_state.loaded {
@@ -28,21 +30,21 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // stats bar
-            Constraint::Min(8),    // filter panel + issue list
+            Constraint::Min(8),    // filter panel + tree + issue list
             Constraint::Length(10), // detail panel
         ])
         .split(area);
 
     render_stats_bar(f, app, vert[0]);
 
-    // Body: filter panel (left) + issue list (right)
+    // Body: left panel (filters + tree) | right panel (issue list + search overlay)
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(18), Constraint::Min(20)])
+        .constraints([Constraint::Length(26), Constraint::Min(20)])
         .split(vert[1]);
 
-    render_filter_panel(f, app, body[0]);
-    render_issue_list(f, app, body[1]);
+    render_left_panel(f, app, body[0]);
+    render_right_panel(f, app, body[1]);
     render_detail_panel(f, app, vert[2]);
 }
 
@@ -54,6 +56,11 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         IssueFocus::List => "List",
         IssueFocus::Detail => "Detail",
     };
+    let search_hint = if app.issues_state.search.active {
+        "  Esc: close search  Enter: jump to result"
+    } else {
+        "  /: search"
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  Showing: ", theme::LABEL),
@@ -64,6 +71,7 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 "  |  q: quit  r: refresh  Tab/1-8: switch  Up/Down: navigate  Left/Right: focus  Enter: toggle filter",
                 theme::LABEL,
             ),
+            Span::styled(search_hint, Style::default().fg(Color::Yellow)),
         ])),
         area,
     );
@@ -98,6 +106,76 @@ fn render_stats_bar(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+/// Left panel: filter dropdowns on top, tree view below.
+fn render_left_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    let left_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(11), // filter dropdowns (3 x 3 + 2 border)
+            Constraint::Min(4),    // tree view
+        ])
+        .split(area);
+
+    render_filter_panel(f, app, left_layout[0]);
+    render_tree_panel(f, app, left_layout[1]);
+}
+
+/// Right panel: search bar (when active) + issue list.
+fn render_right_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.issues_state.search.active {
+        let right_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // search bar
+                Constraint::Min(4),   // issue list
+            ])
+            .split(area);
+
+        render_search_bar(f, &app.issues_state.search, right_layout[0]);
+        render_issue_list(f, app, right_layout[1]);
+
+        // Render search results overlay on top of the issue list
+        if !app.issues_state.search.results.is_empty() {
+            let overlay_area = Rect::new(
+                right_layout[1].x,
+                right_layout[1].y,
+                right_layout[1].width,
+                right_layout[1].height.min(12),
+            );
+            render_search_results(f, &mut app.issues_state.search, overlay_area, 10);
+        }
+    } else {
+        render_issue_list(f, app, area);
+    }
+}
+
+fn render_tree_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    let is_focused = app.issues_state.focus == IssueFocus::Filters;
+    let accent = if is_focused { Color::DarkGray } else { Color::DarkGray };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(accent))
+        .title(Span::styled(
+            " Clusters ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.issues_state.tree.is_empty() {
+        f.render_widget(
+            Paragraph::new("  (no clusters)").style(theme::LABEL),
+            inner,
+        );
+        return;
+    }
+
+    render_tree(f, &mut app.issues_state.tree, inner, is_focused);
 }
 
 fn render_filter_panel(f: &mut Frame, app: &mut App, area: Rect) {
@@ -406,7 +484,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-// ──────────────── Helpers ────────────────
+// ---- Helpers ----
 
 fn severity_icon(severity: &str) -> Span<'static> {
     match severity {

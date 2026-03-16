@@ -247,10 +247,63 @@ fn main() -> io::Result<()> {
                         }
                     }
 
+                    // Issues tab: search mode captures all input first
+                    if app.current_tab == Tab::Issues && app.issues_state.search.active {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.issues_state.search.deactivate();
+                            }
+                            KeyCode::Enter => {
+                                // Jump to selected search result
+                                if let Some(result_idx) = app.issues_state.search.selected_result_index() {
+                                    // result_idx is the index in the original issues list
+                                    // Find it in filtered_indices
+                                    if let Some(pos) = app.issues_state.filtered_indices.iter().position(|&fi| fi == result_idx) {
+                                        app.issues_state.selected_index = pos;
+                                        app.issues_state.list_state.select(Some(pos));
+                                        app.issues_state.detail_scroll = 0;
+                                    }
+                                }
+                                app.issues_state.search.deactivate();
+                            }
+                            KeyCode::Up => {
+                                app.issues_state.search.select_prev();
+                            }
+                            KeyCode::Down => {
+                                app.issues_state.search.select_next();
+                            }
+                            KeyCode::Backspace => {
+                                app.issues_state.search.delete_char_before();
+                                let items: Vec<(usize, String)> = app.issues_state.issues.iter().enumerate()
+                                    .map(|(i, issue)| (i, issue.title.clone()))
+                                    .collect();
+                                let item_refs: Vec<(usize, &str)> = items.iter().map(|(i, s)| (*i, s.as_str())).collect();
+                                app.issues_state.search.update_results(&item_refs);
+                            }
+                            KeyCode::Char(c) => {
+                                app.issues_state.search.insert_char(c);
+                                let items: Vec<(usize, String)> = app.issues_state.issues.iter().enumerate()
+                                    .map(|(i, issue)| (i, issue.title.clone()))
+                                    .collect();
+                                let item_refs: Vec<(usize, &str)> = items.iter().map(|(i, s)| (*i, s.as_str())).collect();
+                                app.issues_state.search.update_results(&item_refs);
+                            }
+                            _ => { handled = false; }
+                        }
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
                     // Issues tab captures input for focus navigation and filter dropdowns
                     if app.current_tab == Tab::Issues {
                         let mut handled = true;
                         match key.code {
+                            KeyCode::Char('/') => {
+                                app.issues_state.search.activate();
+                            }
                             KeyCode::Left => {
                                 // Move focus area left: Detail -> List -> Filters
                                 match app.issues_state.focus {
@@ -338,10 +391,58 @@ fn main() -> io::Result<()> {
                         }
                     }
 
+                    // Solutions tab: search mode captures all input first
+                    if app.current_tab == Tab::Solutions && app.solutions_state.search.active {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.solutions_state.search.deactivate();
+                            }
+                            KeyCode::Enter => {
+                                if let Some(result_idx) = app.solutions_state.search.selected_result_index() {
+                                    app.solutions_state.selected_index = result_idx;
+                                    app.solutions_state.list_state.select(Some(result_idx));
+                                    app.solutions_state.detail_scroll = 0;
+                                }
+                                app.solutions_state.search.deactivate();
+                            }
+                            KeyCode::Up => {
+                                app.solutions_state.search.select_prev();
+                            }
+                            KeyCode::Down => {
+                                app.solutions_state.search.select_next();
+                            }
+                            KeyCode::Backspace => {
+                                app.solutions_state.search.delete_char_before();
+                                let items: Vec<(usize, String)> = app.solutions_state.solutions.iter().enumerate()
+                                    .map(|(i, sol)| (i, format!("{} {}", sol.issue_title, sol.summary)))
+                                    .collect();
+                                let item_refs: Vec<(usize, &str)> = items.iter().map(|(i, s)| (*i, s.as_str())).collect();
+                                app.solutions_state.search.update_results(&item_refs);
+                            }
+                            KeyCode::Char(c) => {
+                                app.solutions_state.search.insert_char(c);
+                                let items: Vec<(usize, String)> = app.solutions_state.solutions.iter().enumerate()
+                                    .map(|(i, sol)| (i, format!("{} {}", sol.issue_title, sol.summary)))
+                                    .collect();
+                                let item_refs: Vec<(usize, &str)> = items.iter().map(|(i, s)| (*i, s.as_str())).collect();
+                                app.solutions_state.search.update_results(&item_refs);
+                            }
+                            _ => { handled = false; }
+                        }
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
                     // Solutions tab captures input for list navigation
                     if app.current_tab == Tab::Solutions {
                         let mut handled = true;
                         match key.code {
+                            KeyCode::Char('/') => {
+                                app.solutions_state.search.activate();
+                            }
                             KeyCode::Up => {
                                 app.solutions_state.scroll_list(-1);
                             }
@@ -415,6 +516,64 @@ fn main() -> io::Result<()> {
                             _ => { handled = false; }
                         }
 
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
+                    // Solve tab: search mode captures all input first
+                    if app.current_tab == Tab::Solve && app.solve_state.search.active {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.solve_state.search.deactivate();
+                            }
+                            KeyCode::Enter => {
+                                if let Some(result_idx) = app.solve_state.search.selected_result_index() {
+                                    // Search covers all items: AI first, then Human
+                                    let ai_len = app.solve_state.ai_items.len();
+                                    if result_idx < ai_len {
+                                        app.solve_state.focus = SolveFocus::AiList;
+                                        app.solve_state.ai_selected = result_idx;
+                                        app.solve_state.ai_list_state.select(Some(result_idx));
+                                    } else {
+                                        let human_idx = result_idx - ai_len;
+                                        app.solve_state.focus = SolveFocus::HumanList;
+                                        app.solve_state.human_selected = human_idx;
+                                        app.solve_state.human_list_state.select(Some(human_idx));
+                                    }
+                                }
+                                app.solve_state.search.deactivate();
+                            }
+                            KeyCode::Up => {
+                                app.solve_state.search.select_prev();
+                            }
+                            KeyCode::Down => {
+                                app.solve_state.search.select_next();
+                            }
+                            KeyCode::Backspace => {
+                                app.solve_state.search.delete_char_before();
+                                let items: Vec<(usize, String)> = app.solve_state.ai_items.iter().enumerate()
+                                    .map(|(i, item)| (i, item.name.clone()))
+                                    .chain(app.solve_state.human_items.iter().enumerate()
+                                        .map(|(i, item)| (i + app.solve_state.ai_items.len(), item.name.clone())))
+                                    .collect();
+                                let item_refs: Vec<(usize, &str)> = items.iter().map(|(i, s)| (*i, s.as_str())).collect();
+                                app.solve_state.search.update_results(&item_refs);
+                            }
+                            KeyCode::Char(c) => {
+                                app.solve_state.search.insert_char(c);
+                                let items: Vec<(usize, String)> = app.solve_state.ai_items.iter().enumerate()
+                                    .map(|(i, item)| (i, item.name.clone()))
+                                    .chain(app.solve_state.human_items.iter().enumerate()
+                                        .map(|(i, item)| (i + app.solve_state.ai_items.len(), item.name.clone())))
+                                    .collect();
+                                let item_refs: Vec<(usize, &str)> = items.iter().map(|(i, s)| (*i, s.as_str())).collect();
+                                app.solve_state.search.update_results(&item_refs);
+                            }
+                            _ => { handled = false; }
+                        }
                         if handled {
                             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                             continue;
@@ -556,6 +715,9 @@ fn main() -> io::Result<()> {
                                 for item in &mut app.solve_state.ai_items {
                                     item.checked = !all_checked;
                                 }
+                            }
+                            KeyCode::Char('/') => {
+                                app.solve_state.search.activate();
                             }
                             _ => { handled = false; }
                         }

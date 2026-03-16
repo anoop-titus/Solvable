@@ -11,6 +11,8 @@ use ratatui::{
 
 use crate::app::App;
 use crate::theme;
+use crate::widgets::search::{render_search_bar, render_search_results};
+use crate::widgets::tree::render_tree;
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     if app.research_db_missing || !app.solutions_state.loaded {
@@ -23,18 +25,26 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Main vertical: stats (3) | solution list (min) | detail (10)
+    // Main vertical: stats (3) | body (min) | detail (12)
     let vert = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // stats bar
-            Constraint::Min(6),    // solution list
+            Constraint::Min(6),    // tree + solution list
             Constraint::Length(12), // detail panel
         ])
         .split(area);
 
     render_stats_bar(f, app, vert[0]);
-    render_solution_list(f, app, vert[1]);
+
+    // Body: tree panel (left) + solution list with search (right)
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(22), Constraint::Min(20)])
+        .split(vert[1]);
+
+    render_tree_panel(f, app, body[0]);
+    render_right_panel(f, app, body[1]);
     render_detail_panel(f, app, vert[2]);
 }
 
@@ -45,6 +55,11 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     } else {
         "0/0".to_string()
     };
+    let search_hint = if app.solutions_state.search.active {
+        "  Esc: close search  Enter: jump to result"
+    } else {
+        "  /: search"
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  Solutions: ", theme::LABEL),
@@ -53,6 +68,7 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 "  |  q: quit  r: refresh  Tab/1-8: switch  Up/Down: navigate  scroll: mouse",
                 theme::LABEL,
             ),
+            Span::styled(search_hint, Style::default().fg(Color::Yellow)),
         ])),
         area,
     );
@@ -86,6 +102,60 @@ fn render_stats_bar(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+fn render_tree_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            " By Confidence ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.solutions_state.tree.is_empty() {
+        f.render_widget(
+            Paragraph::new("  (no data)").style(theme::LABEL),
+            inner,
+        );
+        return;
+    }
+
+    render_tree(f, &mut app.solutions_state.tree, inner, false);
+}
+
+/// Right panel: search bar (when active) + solution list.
+fn render_right_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.solutions_state.search.active {
+        let right_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // search bar
+                Constraint::Min(4),   // solution list
+            ])
+            .split(area);
+
+        render_search_bar(f, &app.solutions_state.search, right_layout[0]);
+        render_solution_list(f, app, right_layout[1]);
+
+        // Render search results overlay
+        if !app.solutions_state.search.results.is_empty() {
+            let overlay_area = Rect::new(
+                right_layout[1].x,
+                right_layout[1].y,
+                right_layout[1].width,
+                right_layout[1].height.min(12),
+            );
+            render_search_results(f, &mut app.solutions_state.search, overlay_area, 10);
+        }
+    } else {
+        render_solution_list(f, app, area);
+    }
 }
 
 fn render_solution_list(f: &mut Frame, app: &mut App, area: Rect) {
@@ -272,7 +342,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
-// ──────────────── Helpers ────────────────
+// ---- Helpers ----
 
 fn confidence_color(confidence: &str) -> Color {
     match confidence {

@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::app::{App, SolveFocus, SolveProgress};
 use crate::theme;
+use crate::widgets::search::{render_search_bar, render_search_results};
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     if !app.solve_state.loaded {
@@ -23,19 +24,47 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Layout: stats bar (3) | columns area (min) | solved box (6)
-    let vert = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),   // stats bar
-            Constraint::Min(10),     // two-column area
-            Constraint::Length(8),   // solved box
-        ])
-        .split(area);
+    // Layout: stats bar (3) | search bar (3, conditional) | columns area (min) | solved box (6)
+    if app.solve_state.search.active {
+        let vert = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),   // stats bar
+                Constraint::Length(3),   // search bar
+                Constraint::Min(10),     // two-column area
+                Constraint::Length(8),   // solved box
+            ])
+            .split(area);
 
-    render_stats_bar(f, app, vert[0]);
-    render_columns(f, app, vert[1]);
-    render_solved_box(f, app, vert[2]);
+        render_stats_bar(f, app, vert[0]);
+        render_search_bar(f, &app.solve_state.search, vert[1]);
+        render_columns(f, app, vert[2]);
+        render_solved_box(f, app, vert[3]);
+
+        // Search results overlay on top of columns
+        if !app.solve_state.search.results.is_empty() {
+            let overlay_area = Rect::new(
+                vert[2].x,
+                vert[2].y,
+                vert[2].width,
+                vert[2].height.min(12),
+            );
+            render_search_results(f, &mut app.solve_state.search, overlay_area, 10);
+        }
+    } else {
+        let vert = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),   // stats bar
+                Constraint::Min(10),     // two-column area
+                Constraint::Length(8),   // solved box
+            ])
+            .split(area);
+
+        render_stats_bar(f, app, vert[0]);
+        render_columns(f, app, vert[1]);
+        render_solved_box(f, app, vert[2]);
+    }
 }
 
 pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
@@ -55,6 +84,12 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         SolveFocus::HumanList => "Human List",
         SolveFocus::Solved => "Solved",
         SolveFocus::AiActions => "Actions",
+    };
+
+    let search_hint = if app.solve_state.search.active {
+        "  Esc: close search  Enter: jump"
+    } else {
+        "  /: search"
     };
 
     f.render_widget(
@@ -77,6 +112,7 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
                 "  |  Space: toggle  Enter: action  Tab: cycle  L/R: columns",
                 theme::LABEL,
             ),
+            Span::styled(search_hint, Style::default().fg(Color::Yellow)),
         ])),
         area,
     );
