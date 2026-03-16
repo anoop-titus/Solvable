@@ -5,3 +5,4 @@ pub mod text_input;
 pub mod dropdown;
 pub mod slider;
 pub mod tree;
+pub mod search;
