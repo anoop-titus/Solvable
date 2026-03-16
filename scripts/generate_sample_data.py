@@ -58,7 +58,7 @@ def create_learnings_db():
         pid INTEGER DEFAULT 0
     )""")
 
-    agents = ["medishift-ceo", "heartlab-ceo", "mogul-agent"]
+    agents = ["compliance-ops", "finance-ops", "infra-ops"]
     sources = ["dropbox", "imap", "email", "gdrive"]
 
     sample_learnings = [
@@ -128,11 +128,11 @@ def create_learnings_db():
     # Active run progress
     conn.execute(
         "INSERT INTO run_progress (run_id, source, agent, folder, total_files, processed, status, pid, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("run-001", "dropbox", "medishift-ceo", "/Documents/medishift-ceo", 47, 31, "running", 12345, now.strftime("%Y-%m-%d %H:%M:%S"))
+        ("run-001", "dropbox", "compliance-ops", "/Documents/compliance-ops", 47, 31, "running", 12345, now.strftime("%Y-%m-%d %H:%M:%S"))
     )
     conn.execute(
         "INSERT INTO run_progress (run_id, source, agent, folder, total_files, processed, status, pid, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("run-002", "imap", "heartlab-ceo", "heartlab@company.com", 89, 89, "watching", 12346, now.strftime("%Y-%m-%d %H:%M:%S"))
+        ("run-002", "imap", "finance-ops", "finance@company.com", 89, 89, "watching", 12346, now.strftime("%Y-%m-%d %H:%M:%S"))
     )
 
     conn.commit()
