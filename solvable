@@ -57,7 +57,7 @@ import os
 import subprocess
 import sys
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 TUI_BIN = os.path.join(SCRIPT_DIR, "learner-tui", "target", "release", "solvable")
 LEARN_SCRIPT = os.path.join(SCRIPT_DIR, "learn")
 
