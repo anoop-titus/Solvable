@@ -358,16 +358,24 @@ impl App {
 
     pub fn next_tab(&mut self) {
         let i = self.current_tab.index();
-        self.current_tab = Tab::from_index((i + 1) % Tab::ALL.len()).unwrap();
+        let next = Tab::from_index((i + 1) % Tab::ALL.len()).unwrap();
+        self.set_tab(next);
     }
 
     pub fn prev_tab(&mut self) {
         let i = self.current_tab.index();
-        self.current_tab = Tab::from_index((i + Tab::ALL.len() - 1) % Tab::ALL.len()).unwrap();
+        let prev = Tab::from_index((i + Tab::ALL.len() - 1) % Tab::ALL.len()).unwrap();
+        self.set_tab(prev);
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
         self.current_tab = tab;
+        // Refresh data on tab switch (lazy load, not every tick)
+        match tab {
+            Tab::Issues => self.refresh_issues(),
+            Tab::Solutions => self.refresh_solutions(),
+            _ => {}
+        }
     }
 
     pub fn scroll_dropbox_runs(&mut self, delta: i32) {
