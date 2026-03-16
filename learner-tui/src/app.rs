@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::io_layer::env_store;
+use crate::screens::portal::PortalState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -131,6 +132,9 @@ pub struct App {
     pub screen: Screen,
     pub env_path: std::path::PathBuf,
 
+    // Portal state
+    pub portal: PortalState,
+
     // Tab state
     pub current_tab: Tab,
 
@@ -153,6 +157,10 @@ impl App {
             Screen::Welcome
         };
 
+        let mut portal = PortalState::new();
+        let env_values = env_store::load(&env_path);
+        portal.load_from_env(&env_values);
+
         let mut app = Self {
             source_counts: Vec::new(),
             agent_counts: Vec::new(),
@@ -171,6 +179,7 @@ impl App {
             db_path,
             screen,
             env_path,
+            portal,
             current_tab: Tab::Learnings,
             research_issues: Vec::new(),
             research_solutions: Vec::new(),
@@ -238,8 +247,28 @@ impl App {
         self.research_solutions_state.select(Some(new_pos));
     }
 
+    pub fn has_focused_input(&self) -> bool {
+        match self.current_tab {
+            Tab::Portal => self.portal.has_focused_input(),
+            _ => false,
+        }
+    }
+
+    pub fn has_focused_widget(&self) -> bool {
+        match self.current_tab {
+            Tab::Portal => true, // Portal always captures Tab for its focus chain
+            _ => false,
+        }
+    }
+
     pub fn tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
+        // Clear portal status after 15 ticks (~3 seconds)
+        if self.portal.status_message.is_some() {
+            if self.tick_count.wrapping_sub(self.portal.status_tick) > 15 {
+                self.portal.status_message = None;
+            }
+        }
     }
 
     pub fn refresh(&mut self) {

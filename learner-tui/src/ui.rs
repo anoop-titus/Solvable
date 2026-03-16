@@ -63,6 +63,7 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas, tab_ba
     match app.current_tab {
         Tab::Learnings => render_learnings_tab(f, app, panel_areas, main_layout[1]),
         Tab::Research => render_research_tab(f, app, panel_areas, main_layout[1]),
+        Tab::Portal => crate::screens::portal::render(f, &mut app.portal, main_layout[1]),
         _ => render_stub_tab(f, app.current_tab, main_layout[1]),
     }
 

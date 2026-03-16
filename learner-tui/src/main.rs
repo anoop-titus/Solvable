@@ -66,6 +66,116 @@ fn main() -> io::Result<()> {
                         continue;
                     }
 
+                    // Portal tab captures input for its focus chain
+                    if app.current_tab == Tab::Portal {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Tab => {
+                                app.portal.advance_focus();
+                            }
+                            KeyCode::BackTab => {
+                                app.portal.retreat_focus();
+                            }
+                            KeyCode::Enter => {
+                                // If on a save button, save that section
+                                if let Some(section) = app.portal.focused_save_section() {
+                                    save_portal_section(&app, section);
+                                    app.portal.status_message = Some(("Saved!".to_string(), true));
+                                    app.portal.status_tick = app.tick_count;
+                                }
+                                // If on a dropdown, toggle it
+                                if app.portal.has_focused_dropdown() {
+                                    if let Some(dd) = app.portal.focused_dropdown_mut() {
+                                        dd.toggle();
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                // Close dropdown if expanded, otherwise unfocus
+                                if app.portal.has_focused_dropdown() {
+                                    if let Some(dd) = app.portal.focused_dropdown_mut() {
+                                        if dd.expanded { dd.expanded = false; }
+                                    }
+                                }
+                            }
+                            _ => { handled = false; }
+                        }
+
+                        if !handled {
+                            // If a text input is focused, route character keys to it
+                            if app.portal.has_focused_input() {
+                                handled = true;
+                                match key.code {
+                                    KeyCode::Char(c) => {
+                                        if let Some(input) = app.portal.focused_input_mut() {
+                                            input.insert_char(c);
+                                        }
+                                    }
+                                    KeyCode::Backspace => {
+                                        if let Some(input) = app.portal.focused_input_mut() {
+                                            input.delete_char_before();
+                                        }
+                                    }
+                                    KeyCode::Delete => {
+                                        if let Some(input) = app.portal.focused_input_mut() {
+                                            input.delete_char_at();
+                                        }
+                                    }
+                                    KeyCode::Left => {
+                                        if let Some(input) = app.portal.focused_input_mut() {
+                                            input.move_cursor_left();
+                                        }
+                                    }
+                                    KeyCode::Right => {
+                                        if let Some(input) = app.portal.focused_input_mut() {
+                                            input.move_cursor_right();
+                                        }
+                                    }
+                                    KeyCode::Home => {
+                                        if let Some(input) = app.portal.focused_input_mut() {
+                                            input.move_cursor_home();
+                                        }
+                                    }
+                                    KeyCode::End => {
+                                        if let Some(input) = app.portal.focused_input_mut() {
+                                            input.move_cursor_end();
+                                        }
+                                    }
+                                    _ => { handled = false; }
+                                }
+                            }
+
+                            // If a dropdown is focused and expanded, handle arrow keys
+                            if !handled && app.portal.has_focused_dropdown() {
+                                let expanded = app.portal.focused_dropdown_mut().map(|d| d.expanded).unwrap_or(false);
+                                if expanded {
+                                    handled = true;
+                                    match key.code {
+                                        KeyCode::Up => {
+                                            if let Some(dd) = app.portal.focused_dropdown_mut() { dd.select_prev(); }
+                                        }
+                                        KeyCode::Down => {
+                                            if let Some(dd) = app.portal.focused_dropdown_mut() { dd.select_next(); }
+                                        }
+                                        _ => { handled = false; }
+                                    }
+                                }
+                            }
+                        }
+
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+
+                        // Guard: don't let 'q' or single-char keys quit when input is focused
+                        if app.portal.has_focused_input() {
+                            // Swallow any unhandled key presses to prevent quit
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -179,4 +289,31 @@ fn main() -> io::Result<()> {
 
 fn is_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+}
+
+fn save_portal_section(app: &App, section: &str) {
+    use std::collections::HashMap;
+    use io_layer::env_store;
+    let mut values = HashMap::new();
+    match section {
+        "ai" => {
+            values.insert("OPENROUTER_API_KEY".to_string(), app.portal.api_key.value.clone());
+            values.insert("MODEL_OVERRIDE".to_string(), app.portal.model_dropdown.selected_value().to_string());
+        }
+        "dropbox" => {
+            values.insert("DROPBOX_TOKEN".to_string(), app.portal.dropbox_token.value.clone());
+        }
+        "imap" => {
+            values.insert("IMAP_HOST".to_string(), app.portal.imap_host.value.clone());
+            values.insert("IMAP_PORT".to_string(), app.portal.imap_port.value.clone());
+            values.insert("IMAP_USER".to_string(), app.portal.imap_user.value.clone());
+            values.insert("IMAP_PASS".to_string(), app.portal.imap_pass.value.clone());
+        }
+        "airtable" => {
+            values.insert("AIRTABLE_API_KEY".to_string(), app.portal.airtable_key.value.clone());
+            values.insert("AIRTABLE_BASE_ID".to_string(), app.portal.airtable_base.value.clone());
+        }
+        _ => {}
+    }
+    let _ = env_store::save(&app.env_path, &values);
 }
