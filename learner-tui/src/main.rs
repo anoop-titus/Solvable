@@ -1,6 +1,9 @@
 mod app;
 mod theme;
 mod ui;
+mod widgets;
+mod screens;
+mod io_layer;
 
 use std::io;
 use std::time::Duration;
