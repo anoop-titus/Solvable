@@ -22,6 +22,9 @@ logs/
 .env
 config.yaml
 
+# Sample data (generated)
+scripts/sample_data/
+
 # OS
 .DS_Store
 *.swp

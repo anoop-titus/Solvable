@@ -15,6 +15,8 @@ and builds knowledge meshes so nothing falls through the cracks.
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![Built with Ratatui](https://img.shields.io/badge/TUI-Ratatui-cyan.svg)](https://ratatui.rs/)
 
+![Solvable Demo](screenshots/demo.gif)
+
 </div>
 
 ---
@@ -103,6 +105,22 @@ Solvable ships with a full terminal UI built in Rust with Ratatui. Navigate with
 | **Solve** | Split-screen AI-solvable vs. human-solvable columns. Multi-select with checkboxes, batch solve with progress tracking, and a solved items box at the bottom. Search overlay for finding specific items. |
 | **Portal** | Credential and OAuth management. Configure your OpenRouter API key, select LLM models from a dropdown, enter Dropbox tokens, IMAP credentials, and Airtable keys. OAuth authorization buttons for Google, Microsoft, and Dropbox. |
 | **Settings** | System analysis display and pipeline performance sliders. Tune ingestion batch size, learning chunk size, research limits, issue mesh cap, solution limits, Lvl2 batch size, confluence cap, and debloat rate. Save, reset, and refresh buttons. |
+
+<details>
+<summary><strong>View all tab screenshots</strong></summary>
+
+| Tab | Screenshot |
+|-----|-----------|
+| Learnings | ![Learnings](screenshots/01-learnings.png) |
+| Research | ![Research](screenshots/02-research.png) |
+| Issues | ![Issues](screenshots/03-issues.png) |
+| Solutions | ![Solutions](screenshots/04-solutions.png) |
+| Confluence | ![Confluence](screenshots/05-confluence.png) |
+| Solve | ![Solve](screenshots/06-solve.png) |
+| Portal | ![Portal](screenshots/07-portal.png) |
+| Settings | ![Settings](screenshots/08-settings.png) |
+
+</details>
 
 ## Quickstart
 
