@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OpenFlags};
+use serde_json;
 use std::fs;
 use std::path::Path;
 
@@ -340,6 +341,119 @@ pub fn fetch_solutions_detailed(research_db: &str) -> Option<SolutionsDetailedDa
     })
 }
 
+// ──────────────── Confluence Tab ────────────────
+
+pub struct ConfluenceRecord {
+    pub id: u64,
+    pub issue_cluster_name: String,
+    pub solution_cluster_name: String,
+    pub topical_similarity: f64,
+    pub confluence_score: f64,
+    pub status: String,
+    pub computed_at: String,
+}
+
+pub struct ConfluenceData {
+    pub met: Vec<ConfluenceRecord>,
+    pub unmet: Vec<ConfluenceRecord>,
+    pub gap: Vec<ConfluenceRecord>,
+    pub distant: Vec<ConfluenceRecord>,
+    pub stale: Vec<ConfluenceRecord>,
+    pub total: u64,
+}
+
+impl Default for ConfluenceData {
+    fn default() -> Self {
+        Self {
+            met: Vec::new(),
+            unmet: Vec::new(),
+            gap: Vec::new(),
+            distant: Vec::new(),
+            stale: Vec::new(),
+            total: 0,
+        }
+    }
+}
+
+/// Query mesh.db for confluence data, split by status.
+pub fn fetch_confluences(mesh_db: &str) -> Option<ConfluenceData> {
+    let db_file = Path::new(mesh_db);
+    if !db_file.exists() {
+        return None;
+    }
+
+    let conn = Connection::open_with_flags(
+        mesh_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+
+    // Check if confluences table exists
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='confluences'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !table_exists {
+        return None;
+    }
+
+    let total: u64 = conn
+        .query_row("SELECT COUNT(*) FROM confluences", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    let all_records: Vec<ConfluenceRecord> = conn
+        .prepare(
+            "SELECT id, COALESCE(issue_cluster_name, ''), COALESCE(solution_cluster_name, ''), \
+             COALESCE(topical_similarity, 0.0), COALESCE(confluence_score, 0.0), \
+             COALESCE(status, 'unknown'), COALESCE(computed_at, '') \
+             FROM confluences ORDER BY confluence_score DESC",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| {
+                let computed_at: String = row.get(6)?;
+                let display_time = if computed_at.len() >= 16 {
+                    computed_at[..16].to_string()
+                } else {
+                    computed_at
+                };
+                Ok(ConfluenceRecord {
+                    id: row.get(0)?,
+                    issue_cluster_name: row.get(1)?,
+                    solution_cluster_name: row.get(2)?,
+                    topical_similarity: row.get(3)?,
+                    confluence_score: row.get(4)?,
+                    status: row.get(5)?,
+                    computed_at: display_time,
+                })
+            })
+            .and_then(|rows| rows.collect())
+        })
+        .unwrap_or_default();
+
+    let mut data = ConfluenceData {
+        total,
+        ..ConfluenceData::default()
+    };
+
+    for record in all_records {
+        match record.status.as_str() {
+            "met" => data.met.push(record),
+            "unmet" => data.unmet.push(record),
+            "gap" => data.gap.push(record),
+            "distant" => data.distant.push(record),
+            "stale" => data.stale.push(record),
+            _ => data.gap.push(record), // unknown status -> gap
+        }
+    }
+
+    Some(data)
+}
+
 pub struct LearningsData {
     pub source_counts: Vec<(String, u64)>,
     pub agent_counts: Vec<(String, u64)>,
@@ -577,4 +691,186 @@ pub fn fetch_research(db_path: &str) -> Option<ResearchData> {
         solutions,
         stats,
     })
+}
+
+// ──────────────── Solve Tab (Lvl2 Analyses) ────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SolvableBy {
+    Unknown,
+    Human,
+    AI,
+}
+
+pub struct Lvl2Analysis {
+    pub id: u64,
+    pub cluster_name: String,
+    pub strategy_summary: String,
+    pub auto_actions: Vec<String>,
+    pub output_path: String,
+    pub generated_at: String,
+    pub solvable_by: SolvableBy,
+    pub source: Lvl2Source,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lvl2Source {
+    Cluster,
+    Issue,
+}
+
+pub struct Lvl2Data {
+    pub analyses: Vec<Lvl2Analysis>,
+    pub ai_count: u64,
+    pub human_count: u64,
+}
+
+/// Query mesh.db for lvl2_analyses and issue_lvl2_analyses.
+/// Classifies items: non-empty auto_actions => AI solvable; else => Human solvable.
+pub fn fetch_lvl2_analyses(mesh_db: &str) -> Option<Lvl2Data> {
+    let db_file = Path::new(mesh_db);
+    if !db_file.exists() {
+        return None;
+    }
+
+    let conn = Connection::open_with_flags(
+        mesh_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+
+    let mut analyses = Vec::new();
+
+    // Fetch cluster-level lvl2 analyses
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT id, COALESCE(cluster_name, ''), COALESCE(strategy_summary, ''), \
+         COALESCE(auto_actions, '[]'), COALESCE(output_path, ''), \
+         COALESCE(generated_at, '') FROM lvl2_analyses ORDER BY id DESC",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            let id: u64 = row.get(0)?;
+            let cluster_name: String = row.get(1)?;
+            let strategy_summary: String = row.get(2)?;
+            let auto_actions_json: String = row.get(3)?;
+            let output_path: String = row.get(4)?;
+            let generated_at: String = row.get(5)?;
+            Ok((id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at))
+        }) {
+            for row in rows.flatten() {
+                let (id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at) = row;
+                let parsed_actions = parse_auto_actions(&auto_actions_json);
+                let solvable_by = if parsed_actions.is_empty() {
+                    SolvableBy::Human
+                } else {
+                    SolvableBy::AI
+                };
+                let display_time = if generated_at.len() >= 16 {
+                    generated_at[..16].to_string()
+                } else {
+                    generated_at
+                };
+                analyses.push(Lvl2Analysis {
+                    id,
+                    cluster_name,
+                    strategy_summary,
+                    auto_actions: parsed_actions,
+                    output_path,
+                    generated_at: display_time,
+                    solvable_by,
+                    source: Lvl2Source::Cluster,
+                });
+            }
+        }
+    }
+
+    // Fetch issue-level lvl2 analyses (offset IDs to avoid collision)
+    let id_offset = analyses.len() as u64 * 10000 + 100000;
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT id, COALESCE(cluster_name, ''), COALESCE(strategy_summary, ''), \
+         COALESCE(auto_actions, '[]'), COALESCE(output_path, ''), \
+         COALESCE(generated_at, '') FROM issue_lvl2_analyses ORDER BY id DESC",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            let id: u64 = row.get(0)?;
+            let cluster_name: String = row.get(1)?;
+            let strategy_summary: String = row.get(2)?;
+            let auto_actions_json: String = row.get(3)?;
+            let output_path: String = row.get(4)?;
+            let generated_at: String = row.get(5)?;
+            Ok((id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at))
+        }) {
+            for row in rows.flatten() {
+                let (id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at) = row;
+                let parsed_actions = parse_auto_actions(&auto_actions_json);
+                let solvable_by = if parsed_actions.is_empty() {
+                    SolvableBy::Human
+                } else {
+                    SolvableBy::AI
+                };
+                let display_time = if generated_at.len() >= 16 {
+                    generated_at[..16].to_string()
+                } else {
+                    generated_at
+                };
+                analyses.push(Lvl2Analysis {
+                    id: id + id_offset,
+                    cluster_name: format!("[Issue] {}", cluster_name),
+                    strategy_summary,
+                    auto_actions: parsed_actions,
+                    output_path,
+                    generated_at: display_time,
+                    solvable_by,
+                    source: Lvl2Source::Issue,
+                });
+            }
+        }
+    }
+
+    let ai_count = analyses.iter().filter(|a| a.solvable_by == SolvableBy::AI).count() as u64;
+    let human_count = analyses.iter().filter(|a| a.solvable_by == SolvableBy::Human).count() as u64;
+
+    Some(Lvl2Data {
+        analyses,
+        ai_count,
+        human_count,
+    })
+}
+
+/// Parse auto_actions JSON field into descriptive strings.
+fn parse_auto_actions(json_str: &str) -> Vec<String> {
+    let trimmed = json_str.trim();
+    if trimmed.is_empty() || trimmed == "[]" || trimmed == "null" {
+        return Vec::new();
+    }
+
+    // Try parsing as array of objects with "type" and "payload" fields
+    if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+        let result: Vec<String> = actions
+            .iter()
+            .filter_map(|action| {
+                let action_type = action.get("type").and_then(|v| v.as_str()).unwrap_or("action");
+                let payload = action.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+                if payload.is_empty() {
+                    None
+                } else {
+                    // Truncate payload for display
+                    let display: String = payload.chars().take(80).collect();
+                    Some(format!("[{}] {}", action_type, display))
+                }
+            })
+            .collect();
+        if !result.is_empty() {
+            return result;
+        }
+    }
+
+    // Fallback: try as array of strings
+    if let Ok(strings) = serde_json::from_str::<Vec<String>>(trimmed) {
+        if !strings.is_empty() {
+            return strings;
+        }
+    }
+
+    // If we couldn't parse it but it's not empty/null/[], treat as single action
+    vec![trimmed.chars().take(100).collect()]
 }

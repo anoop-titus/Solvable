@@ -2,8 +2,9 @@ use chrono::Local;
 use ratatui::widgets::ListState;
 
 use crate::io_layer::db::{
-    self, IssueDetail, IssueStats, RecentLearning, ResearchIssue,
-    ResearchSolution, ResearchStats, RunProgress, SolutionDetail, SolutionStats,
+    self, ConfluenceData, ConfluenceRecord, IssueDetail, IssueStats, Lvl2Analysis,
+    RecentLearning, ResearchIssue, ResearchSolution, ResearchStats, RunProgress,
+    SolvableBy, SolutionDetail, SolutionStats,
 };
 use crate::io_layer::env_store;
 use crate::screens::portal::PortalState;
@@ -257,6 +258,528 @@ impl SolutionsState {
     }
 }
 
+// ──────────────── Solve Tab State ────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveFocus {
+    AiList,
+    HumanList,
+    Solved,
+    AiActions,   // Focus on action buttons below AI list
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveProgress {
+    Idle,
+    Solving,
+    Done,
+}
+
+pub struct SolveItem {
+    pub id: u64,
+    pub name: String,
+    pub summary: String,
+    pub checked: bool,
+    pub strikethrough: bool,
+    pub strikethrough_tick: Option<u64>,
+    pub green_flash_until: Option<u64>,
+    pub solving: bool,      // currently being solved
+    pub queued: bool,       // in solve queue
+}
+
+pub struct SolvedItem {
+    pub name: String,
+    pub method: String,     // "AI" or "Human"
+    pub solved_at: String,
+}
+
+pub struct SolveState {
+    pub ai_items: Vec<SolveItem>,
+    pub human_items: Vec<SolveItem>,
+    pub solved_items: Vec<SolvedItem>,
+    pub focus: SolveFocus,
+    pub ai_list_state: ListState,
+    pub human_list_state: ListState,
+    pub solved_list_state: ListState,
+    pub ai_selected: usize,
+    pub human_selected: usize,
+    pub solved_selected: usize,
+    pub progress: SolveProgress,
+    pub solve_queue: Vec<usize>,      // indices into ai_items
+    pub solve_current: usize,         // current index in solve_queue
+    pub solve_tick: u64,              // tick when current solve started
+    pub active_button: usize,         // 0=Solve, 1=Transfer, 2=Dissolve
+    pub loaded: bool,
+    pub ai_count: u64,
+    pub human_count: u64,
+    pub total_count: u64,
+}
+
+impl Default for SolveState {
+    fn default() -> Self {
+        Self {
+            ai_items: Vec::new(),
+            human_items: Vec::new(),
+            solved_items: Vec::new(),
+            focus: SolveFocus::AiList,
+            ai_list_state: ListState::default(),
+            human_list_state: ListState::default(),
+            solved_list_state: ListState::default(),
+            ai_selected: 0,
+            human_selected: 0,
+            solved_selected: 0,
+            progress: SolveProgress::Idle,
+            solve_queue: Vec::new(),
+            solve_current: 0,
+            solve_tick: 0,
+            active_button: 0,
+            loaded: false,
+            ai_count: 0,
+            human_count: 0,
+            total_count: 0,
+        }
+    }
+}
+
+impl SolveState {
+    pub fn scroll_ai(&mut self, delta: i32) {
+        if self.ai_items.is_empty() { return; }
+        let max = self.ai_items.len().saturating_sub(1);
+        self.ai_selected = if delta > 0 {
+            (self.ai_selected + delta as usize).min(max)
+        } else {
+            self.ai_selected.saturating_sub((-delta) as usize)
+        };
+        self.ai_list_state.select(Some(self.ai_selected));
+    }
+
+    pub fn scroll_human(&mut self, delta: i32) {
+        if self.human_items.is_empty() { return; }
+        let max = self.human_items.len().saturating_sub(1);
+        self.human_selected = if delta > 0 {
+            (self.human_selected + delta as usize).min(max)
+        } else {
+            self.human_selected.saturating_sub((-delta) as usize)
+        };
+        self.human_list_state.select(Some(self.human_selected));
+    }
+
+    pub fn scroll_solved(&mut self, delta: i32) {
+        if self.solved_items.is_empty() { return; }
+        let max = self.solved_items.len().saturating_sub(1);
+        self.solved_selected = if delta > 0 {
+            (self.solved_selected + delta as usize).min(max)
+        } else {
+            self.solved_selected.saturating_sub((-delta) as usize)
+        };
+        self.solved_list_state.select(Some(self.solved_selected));
+    }
+
+    pub fn toggle_ai_check(&mut self) {
+        if let Some(item) = self.ai_items.get_mut(self.ai_selected) {
+            item.checked = !item.checked;
+        }
+    }
+
+    pub fn toggle_human_check(&mut self) {
+        if let Some(item) = self.human_items.get_mut(self.human_selected) {
+            if item.strikethrough {
+                // Undo strikethrough
+                item.strikethrough = false;
+                item.strikethrough_tick = None;
+            } else {
+                // Start strikethrough with auto-delete timer
+                item.strikethrough = true;
+                // strikethrough_tick is set by the caller (needs tick_count)
+            }
+        }
+    }
+
+    /// Start AI solving on all checked items.
+    pub fn start_solve(&mut self, tick: u64) -> bool {
+        if self.progress != SolveProgress::Idle {
+            return false;
+        }
+        self.solve_queue = self.ai_items.iter().enumerate()
+            .filter(|(_, item)| item.checked)
+            .map(|(i, _)| i)
+            .collect();
+        if self.solve_queue.is_empty() {
+            return false;
+        }
+        // Mark queued items
+        for &idx in &self.solve_queue {
+            self.ai_items[idx].queued = true;
+        }
+        // Start solving first item
+        self.solve_current = 0;
+        if let Some(&idx) = self.solve_queue.first() {
+            self.ai_items[idx].solving = true;
+            self.ai_items[idx].queued = false;
+        }
+        self.solve_tick = tick;
+        self.progress = SolveProgress::Solving;
+        true
+    }
+
+    /// Transfer checked AI items to Human column.
+    pub fn transfer_to_human(&mut self) {
+        let mut transferred = Vec::new();
+        let mut keep_indices = Vec::new();
+        for (i, item) in self.ai_items.iter().enumerate() {
+            if item.checked {
+                transferred.push(SolveItem {
+                    id: item.id,
+                    name: item.name.clone(),
+                    summary: item.summary.clone(),
+                    checked: false,
+                    strikethrough: false,
+                    strikethrough_tick: None,
+                    green_flash_until: None,
+                    solving: false,
+                    queued: false,
+                });
+            } else {
+                keep_indices.push(i);
+            }
+        }
+        let remaining: Vec<SolveItem> = keep_indices.into_iter()
+            .map(|i| std::mem::replace(&mut self.ai_items[i], SolveItem {
+                id: 0, name: String::new(), summary: String::new(),
+                checked: false, strikethrough: false, strikethrough_tick: None,
+                green_flash_until: None, solving: false, queued: false,
+            }))
+            .collect();
+        self.ai_items = remaining;
+        self.human_items.extend(transferred);
+        self.fix_ai_selection();
+        self.fix_human_selection();
+    }
+
+    /// Dissolve (discard) checked AI items with strikethrough animation.
+    pub fn dissolve_checked(&mut self, tick: u64) {
+        for item in &mut self.ai_items {
+            if item.checked {
+                item.strikethrough = true;
+                item.strikethrough_tick = Some(tick);
+                item.checked = false;
+            }
+        }
+    }
+
+    /// Tick-based animations. Returns true if state changed (needs re-render).
+    pub fn tick(&mut self, tick: u64) -> bool {
+        let mut changed = false;
+
+        // Process solve queue
+        if self.progress == SolveProgress::Solving {
+            let elapsed = tick.wrapping_sub(self.solve_tick);
+            if elapsed >= 10 {  // 2 seconds per item (10 ticks at 200ms)
+                if let Some(&idx) = self.solve_queue.get(self.solve_current) {
+                    // Complete current solve
+                    self.ai_items[idx].solving = false;
+                    self.ai_items[idx].green_flash_until = Some(tick + 25); // 5s flash
+
+                    let now = chrono::Local::now().format("%H:%M").to_string();
+                    self.solved_items.push(SolvedItem {
+                        name: self.ai_items[idx].name.clone(),
+                        method: "AI".to_string(),
+                        solved_at: now,
+                    });
+
+                    // Advance to next item
+                    self.solve_current += 1;
+                    if self.solve_current < self.solve_queue.len() {
+                        let next_idx = self.solve_queue[self.solve_current];
+                        self.ai_items[next_idx].solving = true;
+                        self.ai_items[next_idx].queued = false;
+                        self.solve_tick = tick;
+                    } else {
+                        // All done, remove solved items from AI list
+                        let solved_ids: Vec<u64> = self.solve_queue.iter()
+                            .filter_map(|&i| self.ai_items.get(i).map(|item| item.id))
+                            .collect();
+                        self.ai_items.retain(|item| !solved_ids.contains(&item.id));
+                        self.solve_queue.clear();
+                        self.progress = SolveProgress::Done;
+                        self.fix_ai_selection();
+                        self.fix_solved_selection();
+                    }
+                    changed = true;
+                }
+            }
+        }
+
+        // Clear Done state after a moment
+        if self.progress == SolveProgress::Done {
+            self.progress = SolveProgress::Idle;
+        }
+
+        // Process green flash expirations
+        for item in &mut self.ai_items {
+            if let Some(until) = item.green_flash_until {
+                if tick >= until {
+                    item.green_flash_until = None;
+                    changed = true;
+                }
+            }
+        }
+
+        // Process human strikethrough auto-deletes (25 ticks = ~5 seconds)
+        let mut moved_to_solved = Vec::new();
+        self.human_items.retain(|item| {
+            if item.strikethrough {
+                if let Some(st) = item.strikethrough_tick {
+                    if tick.wrapping_sub(st) >= 25 {
+                        moved_to_solved.push(SolvedItem {
+                            name: item.name.clone(),
+                            method: "Human".to_string(),
+                            solved_at: chrono::Local::now().format("%H:%M").to_string(),
+                        });
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+        if !moved_to_solved.is_empty() {
+            self.solved_items.extend(moved_to_solved);
+            self.fix_human_selection();
+            self.fix_solved_selection();
+            changed = true;
+        }
+
+        // Process AI dissolve strikethrough auto-deletes
+        self.ai_items.retain(|item| {
+            if item.strikethrough {
+                if let Some(st) = item.strikethrough_tick {
+                    if tick.wrapping_sub(st) >= 25 {
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+
+        changed
+    }
+
+    fn fix_ai_selection(&mut self) {
+        if self.ai_items.is_empty() {
+            self.ai_selected = 0;
+            self.ai_list_state.select(None);
+        } else {
+            self.ai_selected = self.ai_selected.min(self.ai_items.len() - 1);
+            self.ai_list_state.select(Some(self.ai_selected));
+        }
+    }
+
+    fn fix_human_selection(&mut self) {
+        if self.human_items.is_empty() {
+            self.human_selected = 0;
+            self.human_list_state.select(None);
+        } else {
+            self.human_selected = self.human_selected.min(self.human_items.len() - 1);
+            self.human_list_state.select(Some(self.human_selected));
+        }
+    }
+
+    fn fix_solved_selection(&mut self) {
+        if self.solved_items.is_empty() {
+            self.solved_selected = 0;
+            self.solved_list_state.select(None);
+        } else {
+            self.solved_selected = self.solved_items.len() - 1;
+            self.solved_list_state.select(Some(self.solved_selected));
+        }
+    }
+
+    pub fn checked_ai_count(&self) -> usize {
+        self.ai_items.iter().filter(|i| i.checked).count()
+    }
+}
+
+// ──────────────── Confluence Tab State ────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfluenceFocus {
+    Met,
+    Unmet,
+    Solved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveStatus {
+    Idle,
+    Solving(u64),     // confluence ID being solved
+    Solved(u64),      // ID of just-solved item (flash state)
+}
+
+pub struct SolvedConfluence {
+    pub id: u64,
+    pub name: String,
+    pub solved_at: String,
+    pub method: String, // "AI" or "Human"
+}
+
+pub struct ConfluenceState {
+    pub data: ConfluenceData,
+    pub met_list_state: ListState,
+    pub unmet_list_state: ListState,
+    pub met_selected: usize,
+    pub unmet_selected: usize,
+    pub solved_items: Vec<SolvedConfluence>,
+    pub solved_list_state: ListState,
+    pub solved_selected: usize,
+    pub focus: ConfluenceFocus,
+    pub solve_status: SolveStatus,
+    pub solve_tick: u64,         // tick when solve started (for simulated delay)
+    pub flash_tick: u64,         // tick when flash started (for green highlight)
+    pub loaded: bool,
+}
+
+impl Default for ConfluenceState {
+    fn default() -> Self {
+        Self {
+            data: ConfluenceData::default(),
+            met_list_state: ListState::default(),
+            unmet_list_state: ListState::default(),
+            met_selected: 0,
+            unmet_selected: 0,
+            solved_items: Vec::new(),
+            solved_list_state: ListState::default(),
+            solved_selected: 0,
+            focus: ConfluenceFocus::Met,
+            solve_status: SolveStatus::Idle,
+            solve_tick: 0,
+            flash_tick: 0,
+            loaded: false,
+        }
+    }
+}
+
+impl ConfluenceState {
+    pub fn scroll_met(&mut self, delta: i32) {
+        if self.data.met.is_empty() { return; }
+        let max = self.data.met.len().saturating_sub(1);
+        self.met_selected = if delta > 0 {
+            (self.met_selected + delta as usize).min(max)
+        } else {
+            self.met_selected.saturating_sub((-delta) as usize)
+        };
+        self.met_list_state.select(Some(self.met_selected));
+    }
+
+    pub fn scroll_unmet(&mut self, delta: i32) {
+        if self.data.unmet.is_empty() { return; }
+        let max = self.data.unmet.len().saturating_sub(1);
+        self.unmet_selected = if delta > 0 {
+            (self.unmet_selected + delta as usize).min(max)
+        } else {
+            self.unmet_selected.saturating_sub((-delta) as usize)
+        };
+        self.unmet_list_state.select(Some(self.unmet_selected));
+    }
+
+    pub fn scroll_solved(&mut self, delta: i32) {
+        if self.solved_items.is_empty() { return; }
+        let max = self.solved_items.len().saturating_sub(1);
+        self.solved_selected = if delta > 0 {
+            (self.solved_selected + delta as usize).min(max)
+        } else {
+            self.solved_selected.saturating_sub((-delta) as usize)
+        };
+        self.solved_list_state.select(Some(self.solved_selected));
+    }
+
+    pub fn selected_confluence(&self) -> Option<&ConfluenceRecord> {
+        match self.focus {
+            ConfluenceFocus::Met => self.data.met.get(self.met_selected),
+            ConfluenceFocus::Unmet => self.data.unmet.get(self.unmet_selected),
+            ConfluenceFocus::Solved => None,
+        }
+    }
+
+    /// Initiate a simulated solve on the currently selected confluence.
+    pub fn trigger_solve(&mut self, tick: u64) -> bool {
+        if !matches!(self.solve_status, SolveStatus::Idle) {
+            return false;
+        }
+        if let Some(conf) = self.selected_confluence() {
+            self.solve_status = SolveStatus::Solving(conf.id);
+            self.solve_tick = tick;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if simulated solve has completed (called from tick).
+    /// Returns true if a solve just completed and needs re-render.
+    pub fn tick_solve(&mut self, tick: u64) -> bool {
+        match self.solve_status {
+            SolveStatus::Solving(id) => {
+                // Simulate 2-second solve (10 ticks at 200ms)
+                if tick.wrapping_sub(self.solve_tick) >= 10 {
+                    // Find the record name for the solved item
+                    let name = self.data.met.iter()
+                        .chain(self.data.unmet.iter())
+                        .find(|r| r.id == id)
+                        .map(|r| format!("{} <> {}", r.issue_cluster_name, r.solution_cluster_name))
+                        .unwrap_or_else(|| format!("Confluence #{}", id));
+
+                    let now = chrono::Local::now().format("%H:%M").to_string();
+                    self.solved_items.push(SolvedConfluence {
+                        id,
+                        name,
+                        solved_at: now,
+                        method: "AI".to_string(),
+                    });
+
+                    // Remove from met/unmet lists
+                    self.data.met.retain(|r| r.id != id);
+                    self.data.unmet.retain(|r| r.id != id);
+
+                    // Fix selections after removal
+                    if !self.data.met.is_empty() {
+                        self.met_selected = self.met_selected.min(self.data.met.len() - 1);
+                        self.met_list_state.select(Some(self.met_selected));
+                    } else {
+                        self.met_selected = 0;
+                        self.met_list_state.select(None);
+                    }
+                    if !self.data.unmet.is_empty() {
+                        self.unmet_selected = self.unmet_selected.min(self.data.unmet.len() - 1);
+                        self.unmet_list_state.select(Some(self.unmet_selected));
+                    } else {
+                        self.unmet_selected = 0;
+                        self.unmet_list_state.select(None);
+                    }
+
+                    // Select the new solved item
+                    if !self.solved_items.is_empty() {
+                        self.solved_selected = self.solved_items.len() - 1;
+                        self.solved_list_state.select(Some(self.solved_selected));
+                    }
+
+                    self.solve_status = SolveStatus::Solved(id);
+                    self.flash_tick = tick;
+                    return true;
+                }
+            }
+            SolveStatus::Solved(_) => {
+                // Clear flash after 25 ticks (~5 seconds)
+                if tick.wrapping_sub(self.flash_tick) >= 25 {
+                    self.solve_status = SolveStatus::Idle;
+                    return true;
+                }
+            }
+            SolveStatus::Idle => {}
+        }
+        false
+    }
+}
+
 pub struct App {
     pub source_counts: Vec<(String, u64)>,
     pub agent_counts: Vec<(String, u64)>,
@@ -298,6 +821,12 @@ pub struct App {
 
     // Solutions tab
     pub solutions_state: SolutionsState,
+
+    // Confluence tab
+    pub confluence_state: ConfluenceState,
+
+    // Solve tab
+    pub solve_state: SolveState,
 
     // Settings tab
     pub settings: SettingsState,
@@ -350,6 +879,8 @@ impl App {
             research_db_path,
             issues_state: IssuesState::default(),
             solutions_state: SolutionsState::default(),
+            confluence_state: ConfluenceState::default(),
+            solve_state: SolveState::default(),
             settings,
         };
         app.refresh();
@@ -374,6 +905,8 @@ impl App {
         match tab {
             Tab::Issues => self.refresh_issues(),
             Tab::Solutions => self.refresh_solutions(),
+            Tab::Confluence => self.refresh_confluences(),
+            Tab::Solve => self.refresh_solve(),
             _ => {}
         }
     }
@@ -446,6 +979,89 @@ impl App {
         }
     }
 
+    pub fn refresh_confluences(&mut self) {
+        if let Some(mesh_path) = self.mesh_db_path() {
+            match db::fetch_confluences(&mesh_path) {
+                Some(data) => {
+                    // Preserve solved items across refreshes
+                    let solved = std::mem::take(&mut self.confluence_state.solved_items);
+                    let focus = self.confluence_state.focus;
+                    let solve_status = self.confluence_state.solve_status;
+                    let solve_tick = self.confluence_state.solve_tick;
+                    let flash_tick = self.confluence_state.flash_tick;
+
+                    self.confluence_state.data = data;
+                    self.confluence_state.solved_items = solved;
+                    self.confluence_state.focus = focus;
+                    self.confluence_state.solve_status = solve_status;
+                    self.confluence_state.solve_tick = solve_tick;
+                    self.confluence_state.flash_tick = flash_tick;
+
+                    // Initialize list selections
+                    if !self.confluence_state.data.met.is_empty() && self.confluence_state.met_list_state.selected().is_none() {
+                        self.confluence_state.met_list_state.select(Some(0));
+                    }
+                    if !self.confluence_state.data.unmet.is_empty() && self.confluence_state.unmet_list_state.selected().is_none() {
+                        self.confluence_state.unmet_list_state.select(Some(0));
+                    }
+                    self.confluence_state.loaded = true;
+                }
+                None => {
+                    self.confluence_state.loaded = false;
+                }
+            }
+        } else {
+            self.confluence_state.loaded = false;
+        }
+    }
+
+    pub fn refresh_solve(&mut self) {
+        // Only load if not already loaded (to preserve in-session state)
+        if self.solve_state.loaded {
+            return;
+        }
+        if let Some(mesh_path) = self.mesh_db_path() {
+            match db::fetch_lvl2_analyses(&mesh_path) {
+                Some(data) => {
+                    let mut ai_items = Vec::new();
+                    let mut human_items = Vec::new();
+                    for analysis in data.analyses {
+                        let item = SolveItem {
+                            id: analysis.id,
+                            name: analysis.cluster_name,
+                            summary: analysis.strategy_summary,
+                            checked: false,
+                            strikethrough: false,
+                            strikethrough_tick: None,
+                            green_flash_until: None,
+                            solving: false,
+                            queued: false,
+                        };
+                        match analysis.solvable_by {
+                            SolvableBy::AI => ai_items.push(item),
+                            SolvableBy::Human | SolvableBy::Unknown => human_items.push(item),
+                        }
+                    }
+                    self.solve_state.ai_count = data.ai_count;
+                    self.solve_state.human_count = data.human_count;
+                    self.solve_state.total_count = data.ai_count + data.human_count;
+                    self.solve_state.ai_items = ai_items;
+                    self.solve_state.human_items = human_items;
+                    if !self.solve_state.ai_items.is_empty() {
+                        self.solve_state.ai_list_state.select(Some(0));
+                    }
+                    if !self.solve_state.human_items.is_empty() {
+                        self.solve_state.human_list_state.select(Some(0));
+                    }
+                    self.solve_state.loaded = true;
+                }
+                None => {
+                    self.solve_state.loaded = false;
+                }
+            }
+        }
+    }
+
     pub fn refresh_solutions(&mut self) {
         match db::fetch_solutions_detailed(&self.research_db_path) {
             Some(data) => {
@@ -492,6 +1108,10 @@ impl App {
                 self.settings.status_message = None;
             }
         }
+        // Advance confluence solve simulation
+        self.confluence_state.tick_solve(self.tick_count);
+        // Advance solve tab animations
+        self.solve_state.tick(self.tick_count);
     }
 
     pub fn refresh(&mut self) {

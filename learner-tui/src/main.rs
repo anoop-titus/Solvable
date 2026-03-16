@@ -17,7 +17,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{App, IssueFocus, Screen, Tab};
+use app::{App, ConfluenceFocus, IssueFocus, Screen, SolveStatus, Tab};
 use io_layer::oauth::{self, OAuthProvider, OAuthStatus, DeviceFlowState};
 use screens::settings::SettingsAction;
 use ui::PanelAreas;
@@ -357,6 +357,70 @@ fn main() -> io::Result<()> {
                         }
                     }
 
+                    // Confluence tab captures input for panel navigation and solve
+                    if app.current_tab == Tab::Confluence {
+                        let mut handled = true;
+                        match key.code {
+                            KeyCode::Left => {
+                                match app.confluence_state.focus {
+                                    ConfluenceFocus::Unmet => app.confluence_state.focus = ConfluenceFocus::Met,
+                                    ConfluenceFocus::Solved => app.confluence_state.focus = ConfluenceFocus::Met,
+                                    ConfluenceFocus::Met => {} // already leftmost
+                                }
+                            }
+                            KeyCode::Right => {
+                                match app.confluence_state.focus {
+                                    ConfluenceFocus::Met => app.confluence_state.focus = ConfluenceFocus::Unmet,
+                                    ConfluenceFocus::Solved => app.confluence_state.focus = ConfluenceFocus::Unmet,
+                                    ConfluenceFocus::Unmet => {} // already rightmost
+                                }
+                            }
+                            KeyCode::Tab => {
+                                // Cycle: Met -> Unmet -> Solved -> Met
+                                app.confluence_state.focus = match app.confluence_state.focus {
+                                    ConfluenceFocus::Met => ConfluenceFocus::Unmet,
+                                    ConfluenceFocus::Unmet => ConfluenceFocus::Solved,
+                                    ConfluenceFocus::Solved => ConfluenceFocus::Met,
+                                };
+                            }
+                            KeyCode::BackTab => {
+                                app.confluence_state.focus = match app.confluence_state.focus {
+                                    ConfluenceFocus::Met => ConfluenceFocus::Solved,
+                                    ConfluenceFocus::Unmet => ConfluenceFocus::Met,
+                                    ConfluenceFocus::Solved => ConfluenceFocus::Unmet,
+                                };
+                            }
+                            KeyCode::Up => {
+                                match app.confluence_state.focus {
+                                    ConfluenceFocus::Met => app.confluence_state.scroll_met(-1),
+                                    ConfluenceFocus::Unmet => app.confluence_state.scroll_unmet(-1),
+                                    ConfluenceFocus::Solved => app.confluence_state.scroll_solved(-1),
+                                }
+                            }
+                            KeyCode::Down => {
+                                match app.confluence_state.focus {
+                                    ConfluenceFocus::Met => app.confluence_state.scroll_met(1),
+                                    ConfluenceFocus::Unmet => app.confluence_state.scroll_unmet(1),
+                                    ConfluenceFocus::Solved => app.confluence_state.scroll_solved(1),
+                                }
+                            }
+                            KeyCode::Enter => {
+                                // Trigger solve on selected met/unmet confluence
+                                if matches!(app.confluence_state.focus, ConfluenceFocus::Met | ConfluenceFocus::Unmet)
+                                    && matches!(app.confluence_state.solve_status, SolveStatus::Idle)
+                                {
+                                    app.confluence_state.trigger_solve(app.tick_count);
+                                }
+                            }
+                            _ => { handled = false; }
+                        }
+
+                        if handled {
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            continue;
+                        }
+                    }
+
                     // Settings tab captures input for sliders and buttons
                     if app.current_tab == Tab::Settings {
                         let mut handled = true;
@@ -547,6 +611,13 @@ fn main() -> io::Result<()> {
                                 }
                                 Tab::Solutions => {
                                     app.solutions_state.scroll_list(delta);
+                                }
+                                Tab::Confluence => {
+                                    match app.confluence_state.focus {
+                                        ConfluenceFocus::Met => app.confluence_state.scroll_met(delta),
+                                        ConfluenceFocus::Unmet => app.confluence_state.scroll_unmet(delta),
+                                        ConfluenceFocus::Solved => app.confluence_state.scroll_solved(delta),
+                                    }
                                 }
                                 _ => {} // stub tabs have no scrollable content yet
                             }
