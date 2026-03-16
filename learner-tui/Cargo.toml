@@ -1,6 +1,6 @@
 [package]
-name = "learner-tui"
-version = "0.1.0"
+name = "solvable"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -8,3 +8,6 @@ ratatui = "0.29"
 crossterm = "0.28"
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = "0.4"
+oauth2 = "4"
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+open = "5"
