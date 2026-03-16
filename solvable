@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""
+Solvable — unified CLI for the auto-learning platform.
+
+Usage:
+  solvable                         Open TUI dashboard
+  solvable learn [flags]           Ingestion daemon (dropbox, email, imap)
+  solvable research [flags]        Research daemon (identify, solve, mesh, confluence)
+  solvable ingest                  Quick single-pass ingestion (alias: learn --once)
+  solvable status                  Combined status of all services
+  solvable stop                    Stop all daemons gracefully
+  solvable nuke                    Force-kill all processes
+
+Learn flags:
+  --once                           Single pass, all sources, exit
+  --parallel [-p]                  Run sources in parallel
+  --dropbox                        Dropbox sources only
+  --email                          Email/IMAP sources only
+  --aggressive [-a]                3x process multiplier
+  --research                       Include research daemon alongside
+  --stop [RUN_ID]                  Stop daemon or specific run
+  --status                         Show daemon status
+  --jobs                           List active jobs
+
+Research flags:
+  --once                           Single pass, all phases, exit
+  --status                         Daemon status + DB stats
+  --jobs                           Research statistics
+  --stop                           Stop daemon
+  --nuke                           SIGKILL all research processes
+  --fix [--issue ID] [--category CAT] [--dry-run]
+  --approve ID                     Approve pending issue
+  --dismiss ID                     Dismiss pending issue
+  --list-pending                   List issues awaiting approval
+  --model MODEL                    Set/reset OpenRouter model
+  --solution                       Create solution plans (single pass)
+  --fix-solved                     Apply fixes from solution files
+  --solution-daemon                Solution planning daemon (10-min)
+  --lvl-2-daemon                   Level-2 mesh daemon
+  --issue-mesh-daemon              Issue mesh daemon (30-sec)
+  --confluence-daemon              Confluence daemon (60-sec)
+  --lvl-2                          Level-2 analysis (single pass)
+  --issue-mesh                     Issue mesh clustering (single pass)
+  --issue-lvl2                     Issue mesh level-2 (single pass)
+  --confluence                     Confluence analysis (single pass)
+  --view [solution|daemon|lvl2]    Tail log files
+  --activate                       Enable all research services
+  --deactivate                     Disable all research services
+
+Examples:
+  solvable                         Launch the TUI dashboard
+  solvable learn --parallel -a     Aggressive parallel ingestion
+  solvable research --fix --issue 42 --dry-run
+  solvable research --model openrouter/hunter-alpha
+"""
+import os
+import subprocess
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TUI_BIN = os.path.join(SCRIPT_DIR, "learner-tui", "target", "release", "solvable")
+LEARN_SCRIPT = os.path.join(SCRIPT_DIR, "learn")
+
+# Research script lives in the researcher workspace (sibling directory in openclaw)
+_researcher_candidates = [
+    os.path.join(SCRIPT_DIR, "..", "workspace-researcher-agent", "research"),
+    os.path.expanduser("~/.openclaw/workspace-researcher-agent/research"),
+]
+RESEARCH_SCRIPT = next((p for p in _researcher_candidates if os.path.exists(p)), _researcher_candidates[-1])
+
+
+def main():
+    args = sys.argv[1:]
+
+    if not args:
+        if os.path.exists(TUI_BIN):
+            os.execv(TUI_BIN, [TUI_BIN])
+        else:
+            print(f"TUI binary not found: {TUI_BIN}")
+            print("Build it: cd learner-tui && cargo build --release")
+            sys.exit(1)
+
+    subcmd = args[0]
+    remaining = args[1:]
+
+    if subcmd == "learn":
+        _exec_script(LEARN_SCRIPT, remaining)
+    elif subcmd == "research":
+        _exec_script(RESEARCH_SCRIPT, remaining)
+    elif subcmd == "ingest":
+        _exec_script(LEARN_SCRIPT, ["--once"] + remaining)
+    elif subcmd == "status":
+        print("=== Learn Status ===")
+        subprocess.run([sys.executable, LEARN_SCRIPT, "--status"])
+        print("\n=== Research Status ===")
+        subprocess.run([sys.executable, RESEARCH_SCRIPT, "--status"])
+    elif subcmd == "stop":
+        print("Stopping learn daemon...")
+        subprocess.run([sys.executable, LEARN_SCRIPT, "--stop"])
+        print("Stopping research daemon...")
+        subprocess.run([sys.executable, RESEARCH_SCRIPT, "--stop"])
+    elif subcmd == "nuke":
+        print("Force-killing all processes...")
+        subprocess.run([sys.executable, RESEARCH_SCRIPT, "--nuke"])
+        subprocess.run([sys.executable, LEARN_SCRIPT, "--stop"])
+    elif subcmd in ("--help", "-h", "help"):
+        print(__doc__.strip())
+    elif subcmd in ("--version", "-V", "version"):
+        print("Solvable 0.2.0")
+    else:
+        print(f"Unknown subcommand: {subcmd}")
+        print("Run: solvable --help")
+        sys.exit(1)
+
+
+def _exec_script(script_path, args):
+    if not os.path.exists(script_path):
+        print(f"Script not found: {script_path}")
+        sys.exit(1)
+    os.execv(sys.executable, [sys.executable, script_path] + args)
+
+
+if __name__ == "__main__":
+    main()

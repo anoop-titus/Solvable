@@ -9,7 +9,6 @@ Unified learning daemon. Runs Dropbox + Email learning continuously.
   learn --stop                   -- stop the daemon
   learn --status                 -- show daemon status
   learn --once                   -- run one pass and exit
-  learn --tui                    -- open the Ratatui dashboard
 """
 import argparse
 import multiprocessing
@@ -35,7 +34,6 @@ EMAIL_SCRIPT = os.path.join(SCRIPT_DIR, "learn_email.py")
 EMAIL_IMAP_SCRIPT = os.path.join(SCRIPT_DIR, "learn_email_imap.py")
 _research_cfg = get_research_config()
 RESEARCH_SCRIPT = _research_cfg["script"]
-TUI_BIN = os.path.join(SCRIPT_DIR, "learner-tui", "target", "release", "learner-tui")
 EMAIL_INTERVAL_HOURS = 6
 
 # Build folder list and account lists from config
@@ -396,9 +394,6 @@ def main():
     parser.add_argument("--status", action="store_true", help="Show daemon status")
     parser.add_argument("--jobs", action="store_true", help="List active jobs")
     parser.add_argument("--once", action="store_true", help="Run one pass and exit")
-    parser.add_argument("--tui", "--dashboard", "--dash", "-d",
-                        action="store_true", dest="tui",
-                        help="Open the Ratatui dashboard")
     parser.add_argument("--parallel", "-p", action="store_true",
                         help="Run sources in parallel")
     parser.add_argument("--dropbox", action="store_true",
@@ -411,9 +406,7 @@ def main():
                         help="Include researcher daemon alongside learning")
     args = parser.parse_args()
 
-    if args.tui:
-        os.execv(TUI_BIN, [TUI_BIN])
-    elif args.stop is not None:
+    if args.stop is not None:
         if args.stop == "__all__":
             stop_daemon()
         else:
