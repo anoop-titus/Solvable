@@ -7,7 +7,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, RunProgress, Tab};
+use crate::app::{App, RunProgress, Screen, Tab};
+use crate::screens;
 use crate::theme;
 use crate::widgets::tab_bar::TabBarState;
 
@@ -32,6 +33,11 @@ impl Default for PanelAreas {
 }
 
 pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas, tab_bar_state: &mut TabBarState) {
+    if app.screen == Screen::Welcome {
+        screens::welcome::render(f, f.area());
+        return;
+    }
+
     if app.db_missing && app.current_tab == Tab::Learnings {
         let msg = Paragraph::new("No database found. Waiting...")
             .style(Style::default().fg(Color::Yellow))

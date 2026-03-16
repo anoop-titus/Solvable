@@ -4,6 +4,14 @@ use rusqlite::{Connection, OpenFlags};
 use std::fs;
 use std::path::Path;
 
+use crate::io_layer::env_store;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Welcome,
+    Main,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Tab {
@@ -119,6 +127,10 @@ pub struct App {
     pub tick_count: u64,
     db_path: String,
 
+    // Screen / navigation state
+    pub screen: Screen,
+    pub env_path: std::path::PathBuf,
+
     // Tab state
     pub current_tab: Tab,
 
@@ -134,6 +146,13 @@ pub struct App {
 
 impl App {
     pub fn new(db_path: String, research_db_path: String) -> Self {
+        let env_path = env_store::resolve_env_path();
+        let screen = if env_store::has_credentials(&env_path) {
+            Screen::Main
+        } else {
+            Screen::Welcome
+        };
+
         let mut app = Self {
             source_counts: Vec::new(),
             agent_counts: Vec::new(),
@@ -150,6 +169,8 @@ impl App {
             recent_learnings_state: ListState::default(),
             tick_count: 0,
             db_path,
+            screen,
+            env_path,
             current_tab: Tab::Learnings,
             research_issues: Vec::new(),
             research_solutions: Vec::new(),

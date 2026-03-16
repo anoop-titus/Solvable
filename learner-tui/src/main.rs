@@ -15,7 +15,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{App, Tab};
+use app::{App, Screen, Tab};
 use ui::PanelAreas;
 use widgets::tab_bar::TabBarState;
 
@@ -51,6 +51,21 @@ fn main() -> io::Result<()> {
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press { continue; }
+
+                    // Welcome screen captures all input
+                    if app.screen == Screen::Welcome {
+                        match key.code {
+                            KeyCode::Enter => {
+                                app.screen = Screen::Main;
+                                app.set_tab(Tab::Portal);
+                                terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                            }
+                            KeyCode::Char('q') => break,
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -92,6 +107,20 @@ fn main() -> io::Result<()> {
                     }
                 }
                 Event::Mouse(mouse) => {
+                    // Welcome screen mouse handling
+                    if app.screen == Screen::Welcome {
+                        if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
+                            let size = terminal.size()?;
+                            let term_area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+                            if screens::welcome::hit_test_button(mouse.column, mouse.row, term_area) {
+                                app.screen = Screen::Main;
+                                app.set_tab(Tab::Portal);
+                            }
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                        }
+                        continue;
+                    }
+
                     match mouse.kind {
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             let delta = if mouse.kind == MouseEventKind::ScrollUp { -3 } else { 3 };
