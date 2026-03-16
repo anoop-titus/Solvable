@@ -17,6 +17,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::{App, Tab};
 use ui::PanelAreas;
+use widgets::tab_bar::TabBarState;
 
 const DEFAULT_DB_PATH: &str = "./db/learnings.db";
 const RESEARCH_DB_PATH: &str = "./db/research.db";
@@ -40,9 +41,10 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new(db_path, research_db_path);
     let mut panel_areas = PanelAreas::default();
+    let mut tab_bar_state = TabBarState::default();
     let mut tick_since_refresh: u64 = 0;
 
-    terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+    terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
 
     loop {
         if event::poll(Duration::from_millis(TICK_MS))? {
@@ -54,21 +56,21 @@ fn main() -> io::Result<()> {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                         KeyCode::Char('r') => {
                             app.refresh();
-                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                         }
                         KeyCode::Char(c @ '1'..='8') => {
                             if let Some(tab) = Tab::from_index((c as usize) - ('1' as usize)) {
                                 app.set_tab(tab);
-                                terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                                terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                             }
                         }
                         KeyCode::Tab => {
                             app.next_tab();
-                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                         }
                         KeyCode::BackTab => {
                             app.prev_tab();
-                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                         }
                         KeyCode::Up => {
                             match app.current_tab {
@@ -76,7 +78,7 @@ fn main() -> io::Result<()> {
                                 Tab::Research => app.scroll_research_issues(-1),
                                 _ => {} // stub tabs have no scrollable content yet
                             }
-                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                         }
                         KeyCode::Down => {
                             match app.current_tab {
@@ -84,7 +86,7 @@ fn main() -> io::Result<()> {
                                 Tab::Research => app.scroll_research_issues(1),
                                 _ => {} // stub tabs have no scrollable content yet
                             }
-                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                         }
                         _ => {}
                     }
@@ -114,7 +116,13 @@ fn main() -> io::Result<()> {
                                 }
                                 _ => {} // stub tabs have no scrollable content yet
                             }
-                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                        }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            if let Some(tab) = tab_bar_state.hit_test(mouse.column, mouse.row) {
+                                app.set_tab(tab);
+                            }
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
                         }
                         _ => {}
                     }
@@ -128,7 +136,7 @@ fn main() -> io::Result<()> {
                 app.refresh();
                 tick_since_refresh = 0;
             }
-            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
         }
 
         if app.should_quit { break; }

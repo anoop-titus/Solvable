@@ -9,6 +9,7 @@ use ratatui::{
 
 use crate::app::{App, RunProgress, Tab};
 use crate::theme;
+use crate::widgets::tab_bar::TabBarState;
 
 pub struct PanelAreas {
     pub dropbox_runs: Rect,
@@ -30,7 +31,7 @@ impl Default for PanelAreas {
     }
 }
 
-pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas) {
+pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas, tab_bar_state: &mut TabBarState) {
     if app.db_missing && app.current_tab == Tab::Learnings {
         let msg = Paragraph::new("No database found. Waiting...")
             .style(Style::default().fg(Color::Yellow))
@@ -51,7 +52,7 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas) {
         .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
         .split(inner_area);
 
-    render_tab_bar(f, app, main_layout[0]);
+    render_tab_bar(f, app, main_layout[0], tab_bar_state);
 
     match app.current_tab {
         Tab::Learnings => render_learnings_tab(f, app, panel_areas, main_layout[1]),
@@ -66,18 +67,24 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas) {
     }
 }
 
-fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
+fn render_tab_bar(f: &mut Frame, app: &App, area: Rect, tab_bar_state: &mut TabBarState) {
     let mut spans = vec![Span::styled("  ", theme::LABEL)];
+    let mut x_offset = area.x + 2; // account for leading "  " padding
     for (i, tab) in Tab::ALL.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" | ", theme::LABEL));
+            x_offset += 3; // " | " separator width
         }
         let style = if app.current_tab == *tab {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD).add_modifier(Modifier::REVERSED)
         } else {
             theme::LABEL
         };
-        spans.push(Span::styled(format!(" {} ", tab.label()), style));
+        let label = format!(" {} ", tab.label());
+        let label_width = label.len() as u16;
+        tab_bar_state.tab_rects[i] = Rect::new(x_offset, area.y, label_width, 1);
+        spans.push(Span::styled(label, style));
+        x_offset += label_width;
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
