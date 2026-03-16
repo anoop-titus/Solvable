@@ -4,10 +4,43 @@ use rusqlite::{Connection, OpenFlags};
 use std::fs;
 use std::path::Path;
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum Tab {
-    Learnings,
-    Research,
+    Learnings  = 0,
+    Research   = 1,
+    Issues     = 2,
+    Solutions  = 3,
+    Confluence = 4,
+    Solve      = 5,
+    Portal     = 6,
+    Settings   = 7,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 8] = [
+        Tab::Learnings, Tab::Research, Tab::Issues, Tab::Solutions,
+        Tab::Confluence, Tab::Solve, Tab::Portal, Tab::Settings,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Tab::Learnings  => "Learnings",
+            Tab::Research   => "Research",
+            Tab::Issues     => "Issues",
+            Tab::Solutions  => "Solutions",
+            Tab::Confluence => "Confluence",
+            Tab::Solve      => "Solve",
+            Tab::Portal     => "Portal",
+            Tab::Settings   => "\u{2699} Settings",
+        }
+    }
+
+    pub fn index(&self) -> usize { *self as usize }
+
+    pub fn from_index(i: usize) -> Option<Tab> {
+        Tab::ALL.get(i).copied()
+    }
 }
 
 #[allow(dead_code)]
@@ -131,14 +164,17 @@ impl App {
     }
 
     pub fn next_tab(&mut self) {
-        self.current_tab = match self.current_tab {
-            Tab::Learnings => Tab::Research,
-            Tab::Research => Tab::Learnings,
-        };
+        let i = self.current_tab.index();
+        self.current_tab = Tab::from_index((i + 1) % Tab::ALL.len()).unwrap();
     }
 
     pub fn prev_tab(&mut self) {
-        self.next_tab();
+        let i = self.current_tab.index();
+        self.current_tab = Tab::from_index((i + Tab::ALL.len() - 1) % Tab::ALL.len()).unwrap();
+    }
+
+    pub fn set_tab(&mut self, tab: Tab) {
+        self.current_tab = tab;
     }
 
     pub fn scroll_dropbox_runs(&mut self, delta: i32) {

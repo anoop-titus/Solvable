@@ -34,12 +34,12 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas) {
     if app.db_missing && app.current_tab == Tab::Learnings {
         let msg = Paragraph::new("No database found. Waiting...")
             .style(Style::default().fg(Color::Yellow))
-            .block(theme::styled_block("Learner Agent").title_alignment(ratatui::layout::Alignment::Center));
+            .block(theme::styled_block("Solvable").title_alignment(ratatui::layout::Alignment::Center));
         f.render_widget(msg, f.area());
         return;
     }
 
-    let outer = theme::styled_block("Learner Agent")
+    let outer = theme::styled_block("Solvable")
         .title_alignment(ratatui::layout::Alignment::Center);
     let outer_area = f.area();
     let inner_area = outer.inner(outer_area);
@@ -56,28 +56,30 @@ pub fn render(f: &mut Frame, app: &mut App, panel_areas: &mut PanelAreas) {
     match app.current_tab {
         Tab::Learnings => render_learnings_tab(f, app, panel_areas, main_layout[1]),
         Tab::Research => render_research_tab(f, app, panel_areas, main_layout[1]),
+        _ => render_stub_tab(f, app.current_tab, main_layout[1]),
     }
 
     match app.current_tab {
         Tab::Learnings => render_learnings_footer(f, app, main_layout[2]),
         Tab::Research => render_research_footer(f, app, main_layout[2]),
+        _ => render_stub_footer(f, app, main_layout[2]),
     }
 }
 
 fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
-    let learnings_style = if app.current_tab == Tab::Learnings {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD).add_modifier(Modifier::REVERSED)
-    } else { theme::LABEL };
-    let research_style = if app.current_tab == Tab::Research {
-        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD).add_modifier(Modifier::REVERSED)
-    } else { theme::LABEL };
-
-    f.render_widget(Paragraph::new(Line::from(vec![
-        Span::styled("  ", theme::LABEL),
-        Span::styled(" Learnings ", learnings_style),
-        Span::styled(" | ", theme::LABEL),
-        Span::styled(" Research ", research_style),
-    ])), area);
+    let mut spans = vec![Span::styled("  ", theme::LABEL)];
+    for (i, tab) in Tab::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" | ", theme::LABEL));
+        }
+        let style = if app.current_tab == *tab {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD).add_modifier(Modifier::REVERSED)
+        } else {
+            theme::LABEL
+        };
+        spans.push(Span::styled(format!(" {} ", tab.label()), style));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ──────────────── LEARNINGS TAB ────────────────
@@ -246,7 +248,7 @@ fn render_learnings_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(app.format_db_size(), theme::DATA),
         Span::styled("  Updated: ", theme::LABEL),
         Span::styled(&app.last_refresh, theme::DATA),
-        Span::styled("  |  q: quit  r: refresh  Tab: switch  scroll: mouse", theme::LABEL),
+        Span::styled("  |  q: quit  r: refresh  Tab/1-8: switch  scroll: mouse", theme::LABEL),
     ])), area);
 }
 
@@ -387,6 +389,26 @@ fn render_research_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(app.format_research_db_size(), theme::DATA),
         Span::styled("  Updated: ", theme::LABEL),
         Span::styled(&app.last_refresh, theme::DATA),
-        Span::styled("  |  q: quit  r: refresh  Tab: switch  scroll: mouse", theme::LABEL),
+        Span::styled("  |  q: quit  r: refresh  Tab/1-8: switch  scroll: mouse", theme::LABEL),
+    ])), area);
+}
+
+// ──────────────── STUB TABS ────────────────
+
+fn render_stub_tab(f: &mut Frame, tab: Tab, area: Rect) {
+    let msg = format!("  {} \u{2014} Coming soon", tab.label());
+    f.render_widget(
+        Paragraph::new(msg)
+            .style(Style::default().fg(Color::DarkGray))
+            .block(theme::styled_block(tab.label())),
+        area,
+    );
+}
+
+fn render_stub_footer(f: &mut Frame, app: &App, area: Rect) {
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled("  Updated: ", theme::LABEL),
+        Span::styled(&app.last_refresh, theme::DATA),
+        Span::styled("  |  q: quit  r: refresh  Tab/1-8: switch", theme::LABEL),
     ])), area);
 }

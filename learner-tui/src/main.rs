@@ -56,14 +56,25 @@ fn main() -> io::Result<()> {
                             app.refresh();
                             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
                         }
+                        KeyCode::Char(c @ '1'..='8') => {
+                            if let Some(tab) = Tab::from_index((c as usize) - ('1' as usize)) {
+                                app.set_tab(tab);
+                                terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                            }
+                        }
                         KeyCode::Tab => {
                             app.next_tab();
+                            terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
+                        }
+                        KeyCode::BackTab => {
+                            app.prev_tab();
                             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
                         }
                         KeyCode::Up => {
                             match app.current_tab {
                                 Tab::Learnings => app.scroll_recent_learnings(-1),
                                 Tab::Research => app.scroll_research_issues(-1),
+                                _ => {} // stub tabs have no scrollable content yet
                             }
                             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
                         }
@@ -71,6 +82,7 @@ fn main() -> io::Result<()> {
                             match app.current_tab {
                                 Tab::Learnings => app.scroll_recent_learnings(1),
                                 Tab::Research => app.scroll_research_issues(1),
+                                _ => {} // stub tabs have no scrollable content yet
                             }
                             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
                         }
@@ -100,6 +112,7 @@ fn main() -> io::Result<()> {
                                         app.scroll_research_solutions(delta);
                                     }
                                 }
+                                _ => {} // stub tabs have no scrollable content yet
                             }
                             terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas))?;
                         }
