@@ -7,7 +7,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, RunProgress};
+use crate::app::App;
+use crate::io_layer::db::RunProgress;
 use crate::theme;
 use crate::ui::PanelAreas;
 

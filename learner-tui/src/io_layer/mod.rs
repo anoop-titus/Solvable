@@ -1,2 +1,3 @@
 // IO modules
+pub mod db;
 pub mod env_store;

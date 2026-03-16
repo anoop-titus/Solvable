@@ -1,9 +1,9 @@
 use chrono::Local;
 use ratatui::widgets::ListState;
-use rusqlite::{Connection, OpenFlags};
-use std::fs;
-use std::path::Path;
 
+use crate::io_layer::db::{
+    self, RecentLearning, ResearchIssue, ResearchSolution, ResearchStats, RunProgress,
+};
 use crate::io_layer::env_store;
 use crate::screens::portal::PortalState;
 
@@ -49,65 +49,6 @@ impl Tab {
 
     pub fn from_index(i: usize) -> Option<Tab> {
         Tab::ALL.get(i).copied()
-    }
-}
-
-#[allow(dead_code)]
-pub struct RunProgress {
-    pub source: String,
-    pub agent: String,
-    pub folder: String,
-    pub total_files: u64,
-    pub processed: u64,
-    pub status: String,
-    pub pid: u64,
-}
-
-pub struct RecentLearning {
-    pub agent: String,
-    pub learning: String,
-    pub processed_at: String,
-}
-
-pub struct ResearchIssue {
-    pub title: String,
-    pub category: String,
-    pub severity: String,
-    pub status: String,
-    pub created_at: String,
-}
-
-pub struct ResearchSolution {
-    pub issue_title: String,
-    pub summary: String,
-    pub source_url: String,
-    pub confidence: String,
-    pub created_at: String,
-}
-
-pub struct ResearchStats {
-    pub total_issues: u64,
-    pub open_issues: u64,
-    pub solved_issues: u64,
-    pub total_solutions: u64,
-    pub pending_digest: u64,
-    pub last_scan_at: String,
-    pub last_digest_at: String,
-    pub db_size_bytes: u64,
-}
-
-impl Default for ResearchStats {
-    fn default() -> Self {
-        Self {
-            total_issues: 0,
-            open_issues: 0,
-            solved_issues: 0,
-            total_solutions: 0,
-            pending_digest: 0,
-            last_scan_at: String::new(),
-            last_digest_at: String::new(),
-            db_size_bytes: 0,
-        }
     }
 }
 
@@ -278,97 +219,35 @@ impl App {
     }
 
     fn refresh_learnings(&mut self) {
-        let db_file = Path::new(&self.db_path);
-        if !db_file.exists() { self.db_missing = true; return; }
-        self.db_missing = false;
-
-        if let Ok(meta) = fs::metadata(db_file) { self.db_size_bytes = meta.len(); }
-
-        let conn = match Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) {
-            Ok(c) => c,
-            Err(_) => { self.db_missing = true; return; }
-        };
-
-        self.source_counts = conn
-            .prepare("SELECT source, COUNT(*) FROM learnings GROUP BY source ORDER BY COUNT(*) DESC")
-            .and_then(|mut stmt| stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))).and_then(|rows| rows.collect()))
-            .unwrap_or_default();
-
-        self.agent_counts = conn
-            .prepare("SELECT agent, COUNT(*) FROM learnings GROUP BY agent ORDER BY COUNT(*) DESC")
-            .and_then(|mut stmt| stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))).and_then(|rows| rows.collect()))
-            .unwrap_or_default();
-
-        self.total_learnings = conn.query_row("SELECT COUNT(*) FROM learnings", [], |row| row.get(0)).unwrap_or(0);
-
-        let all_runs: Vec<RunProgress> = conn
-            .prepare("SELECT COALESCE(source, ''), COALESCE(agent, ''), COALESCE(folder, ''), total_files, processed, status, COALESCE(pid, 0) FROM run_progress WHERE status IN ('running', 'watching') ORDER BY updated_at DESC")
-            .and_then(|mut stmt| stmt.query_map([], |row| Ok(RunProgress {
-                source: row.get(0)?, agent: row.get(1)?, folder: row.get(2)?,
-                total_files: row.get(3)?, processed: row.get(4)?, status: row.get(5)?,
-                pid: row.get::<_, i64>(6).unwrap_or(0) as u64,
-            })).and_then(|rows| rows.collect()))
-            .unwrap_or_default();
-
-        self.dropbox_runs = Vec::new();
-        self.email_runs = Vec::new();
-        for run in all_runs {
-            if run.source == "dropbox" { self.dropbox_runs.push(run); } else { self.email_runs.push(run); }
+        match db::fetch_learnings(&self.db_path) {
+            Some(data) => {
+                self.db_missing = false;
+                self.source_counts = data.source_counts;
+                self.agent_counts = data.agent_counts;
+                self.dropbox_runs = data.dropbox_runs;
+                self.email_runs = data.email_runs;
+                self.recent_learnings = data.recent_learnings;
+                self.total_learnings = data.total_learnings;
+                self.db_size_bytes = data.db_size_bytes;
+            }
+            None => {
+                self.db_missing = true;
+            }
         }
-
-        self.recent_learnings = conn
-            .prepare("SELECT agent, learning, processed_at FROM learnings ORDER BY id DESC LIMIT 100")
-            .and_then(|mut stmt| stmt.query_map([], |row| {
-                let processed_at: String = row.get::<_, String>(2).unwrap_or_default();
-                let display_time = if processed_at.len() >= 16 { processed_at[11..16].to_string() } else { processed_at.clone() };
-                Ok(RecentLearning { agent: row.get(0)?, learning: row.get(1)?, processed_at: display_time })
-            }).and_then(|rows| rows.collect()))
-            .unwrap_or_default();
     }
 
     fn refresh_research(&mut self) {
-        let db_file = Path::new(&self.research_db_path);
-        if !db_file.exists() { self.research_db_missing = true; return; }
-        self.research_db_missing = false;
-
-        if let Ok(meta) = fs::metadata(db_file) { self.research_stats.db_size_bytes = meta.len(); }
-
-        let conn = match Connection::open_with_flags(&self.research_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) {
-            Ok(c) => c,
-            Err(_) => { self.research_db_missing = true; return; }
-        };
-
-        self.research_stats.total_issues = conn.query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0)).unwrap_or(0);
-        self.research_stats.open_issues = conn.query_row("SELECT COUNT(*) FROM issues WHERE status IN ('open', 'researching')", [], |row| row.get(0)).unwrap_or(0);
-        self.research_stats.solved_issues = conn.query_row("SELECT COUNT(*) FROM issues WHERE status = 'solved'", [], |row| row.get(0)).unwrap_or(0);
-        self.research_stats.total_solutions = conn.query_row("SELECT COUNT(*) FROM solutions", [], |row| row.get(0)).unwrap_or(0);
-        self.research_stats.pending_digest = conn.query_row("SELECT COUNT(*) FROM daily_output", [], |row| row.get(0)).unwrap_or(0);
-
-        if let Ok(row) = conn.query_row(
-            "SELECT COALESCE(last_scan_at, ''), COALESCE(last_digest_at, '') FROM scan_cursor WHERE id = 1", [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ) {
-            self.research_stats.last_scan_at = if row.0.len() >= 16 { row.0[11..16].to_string() } else { row.0 };
-            self.research_stats.last_digest_at = if row.1.len() >= 16 { row.1[11..16].to_string() } else { row.1 };
+        match db::fetch_research(&self.research_db_path) {
+            Some(data) => {
+                self.research_db_missing = false;
+                self.research_issues = data.issues;
+                self.research_solutions = data.solutions;
+                self.research_stats = data.stats;
+            }
+            None => {
+                self.research_db_missing = true;
+            }
         }
-
-        self.research_issues = conn
-            .prepare("SELECT title, COALESCE(category, ''), COALESCE(severity, ''), COALESCE(status, ''), COALESCE(created_at, '') FROM issues ORDER BY id DESC LIMIT 100")
-            .and_then(|mut stmt| stmt.query_map([], |row| {
-                let created_at: String = row.get(4)?;
-                let display_time = if created_at.len() >= 16 { created_at[11..16].to_string() } else { created_at.clone() };
-                Ok(ResearchIssue { title: row.get(0)?, category: row.get(1)?, severity: row.get(2)?, status: row.get(3)?, created_at: display_time })
-            }).and_then(|rows| rows.collect()))
-            .unwrap_or_default();
-
-        self.research_solutions = conn
-            .prepare("SELECT COALESCE(i.title, ''), COALESCE(s.summary, ''), COALESCE(s.source_url, ''), COALESCE(s.confidence, ''), COALESCE(s.created_at, '') FROM solutions s JOIN issues i ON s.issue_id = i.id ORDER BY s.id DESC LIMIT 100")
-            .and_then(|mut stmt| stmt.query_map([], |row| {
-                let created_at: String = row.get(4)?;
-                let display_time = if created_at.len() >= 16 { created_at[11..16].to_string() } else { created_at.clone() };
-                Ok(ResearchSolution { issue_title: row.get(0)?, summary: row.get(1)?, source_url: row.get(2)?, confidence: row.get(3)?, created_at: display_time })
-            }).and_then(|rows| rows.collect()))
-            .unwrap_or_default();
     }
 
     pub fn format_db_size(&self) -> String {
