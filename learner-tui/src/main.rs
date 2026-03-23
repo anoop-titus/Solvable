@@ -17,7 +17,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{App, ConfluenceFocus, IssueFocus, Screen, SolveFocus, SolveProgress, SolveStatus, Tab};
+use app::{App, AutoSolveMode, ConfluenceFocus, IssueFocus, Screen, SolveFocus, SolveProgress, SolveStatus, Tab};
 use io_layer::oauth::{self, OAuthProvider, OAuthStatus, DeviceFlowState};
 use screens::settings::SettingsAction;
 use ui::PanelAreas;
@@ -37,14 +37,30 @@ const RESEARCH_DB_PATH: &str = "./db/research.db";
 const TICK_MS: u64 = 200;
 const REFRESH_INTERVAL: u64 = 25;
 
-fn main() -> io::Result<()> {
-    let db_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_DB_PATH.to_string());
+/// Resolve a DB path: CLI arg → known home-relative path → default fallback.
+fn resolve_db_path(cli_arg: Option<String>, home_rel: &str, default: &str) -> String {
+    if let Some(p) = cli_arg {
+        if std::path::Path::new(&p).exists() { return p; }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let full = format!("{}/{}", home, home_rel);
+        if std::path::Path::new(&full).exists() { return full; }
+    }
+    default.to_string()
+}
 
-    let research_db_path = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| RESEARCH_DB_PATH.to_string());
+fn main() -> io::Result<()> {
+    let db_path = resolve_db_path(
+        std::env::args().nth(1),
+        ".openclaw/workspace-learner-agent/db/learnings.db",
+        DEFAULT_DB_PATH,
+    );
+
+    let research_db_path = resolve_db_path(
+        std::env::args().nth(2),
+        ".openclaw/workspace-researcher-agent/db/research.db",
+        RESEARCH_DB_PATH,
+    );
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -57,6 +73,22 @@ fn main() -> io::Result<()> {
     let mut tab_bar_state = TabBarState::default();
     let mut tick_since_refresh: u64 = 0;
 
+    // Background cleanup: auto-purge "No actionable" data every 5 minutes
+    let (cleanup_tx, cleanup_rx) = std::sync::mpsc::channel::<(usize, usize, usize)>();
+    {
+        let db_path_clone = app.db_path.clone();
+        let research_db_path_clone = app.research_db_path.clone();
+        let tx = cleanup_tx;
+        std::thread::spawn(move || {
+            loop {
+                let n_learn = io_layer::db::delete_no_actionable_learnings(&db_path_clone).unwrap_or(0);
+                let (n_issues, n_sols) = io_layer::db::delete_no_actionable_research(&research_db_path_clone).unwrap_or((0, 0));
+                let _ = tx.send((n_learn, n_issues, n_sols));
+                std::thread::sleep(std::time::Duration::from_secs(300));
+            }
+        });
+    }
+
     // OAuth background state
     let oauth_result: OAuthResult = Arc::new(Mutex::new(None));
     let mut device_poll: Option<DevicePollState> = None;
@@ -68,6 +100,28 @@ fn main() -> io::Result<()> {
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press { continue; }
+
+                    // Overlay key handler — takes priority over everything
+                    if app.overlay.is_some() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => { app.overlay = None; }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if let Some(ref mut ov) = app.overlay { ov.scroll_up(1); }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if let Some(ref mut ov) = app.overlay { ov.scroll_down(3); }
+                            }
+                            KeyCode::PageUp => {
+                                if let Some(ref mut ov) = app.overlay { ov.scroll_up(10); }
+                            }
+                            KeyCode::PageDown => {
+                                if let Some(ref mut ov) = app.overlay { ov.scroll_down(10); }
+                            }
+                            _ => {}
+                        }
+                        terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                        continue; // Skip all other key handling when overlay is open
+                    }
 
                     // Welcome screen captures all input
                     if app.screen == Screen::Welcome {
@@ -89,9 +143,13 @@ fn main() -> io::Result<()> {
                         match key.code {
                             KeyCode::Tab => {
                                 app.portal.advance_focus();
+                                let visible_h = terminal.size().map(|s| s.height.saturating_sub(5)).unwrap_or(20);
+                                app.portal.scroll_to_focus(visible_h);
                             }
                             KeyCode::BackTab => {
                                 app.portal.retreat_focus();
+                                let visible_h = terminal.size().map(|s| s.height.saturating_sub(5)).unwrap_or(20);
+                                app.portal.scroll_to_focus(visible_h);
                             }
                             KeyCode::Enter => {
                                 // If on a save button, save that section
@@ -230,6 +288,32 @@ fn main() -> io::Result<()> {
                                         }
                                         _ => { handled = false; }
                                     }
+                                }
+                            }
+
+                            // Portal scroll: Up/Down/PgUp/PgDn when no input or expanded dropdown
+                            if !handled && !app.portal.has_focused_input()
+                                && !app.portal.has_focused_dropdown()
+                            {
+                                let visible_h = terminal.size().map(|s| s.height.saturating_sub(5)).unwrap_or(20);
+                                match key.code {
+                                    KeyCode::Up => {
+                                        app.portal.scroll_up(3);
+                                        handled = true;
+                                    }
+                                    KeyCode::Down => {
+                                        app.portal.scroll_down(3, visible_h);
+                                        handled = true;
+                                    }
+                                    KeyCode::PageUp => {
+                                        app.portal.scroll_up(10);
+                                        handled = true;
+                                    }
+                                    KeyCode::PageDown => {
+                                        app.portal.scroll_down(10, visible_h);
+                                        handled = true;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -374,6 +458,23 @@ fn main() -> io::Result<()> {
                                             dd.toggle();
                                         }
                                     }
+                                    IssueFocus::List => {
+                                        if !app.issues_state.search.active {
+                                            let idx = app.issues_state.selected_index;
+                                            if let Some(&real_idx) = app.issues_state.filtered_indices.get(idx) {
+                                                if let Some(issue) = app.issues_state.issues.get(real_idx) {
+                                                    let cluster = issue.cluster_name.as_deref().unwrap_or("—");
+                                                    let content = format!(
+                                                        "# {}\n\n**Category:** {} | **Severity:** {} | **Status:** {}\n**Cluster:** {} | **Solutions:** {} | Created: {}\n\n---\n\n{}",
+                                                        issue.title, issue.category, issue.severity, issue.status,
+                                                        cluster, issue.solution_count, issue.created_at, issue.description
+                                                    );
+                                                    let title = issue.title.clone();
+                                                    open_mdr(&mut app, &title, &content);
+                                                }
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -448,6 +549,19 @@ fn main() -> io::Result<()> {
                             }
                             KeyCode::Down => {
                                 app.solutions_state.scroll_list(1);
+                            }
+                            KeyCode::Enter => {
+                                if !app.solutions_state.search.active {
+                                    if let Some(sol) = app.solutions_state.solutions.get(app.solutions_state.selected_index) {
+                                        let content = format!(
+                                            "# {}\n\n**Severity:** {} | **Status:** {} | **Confidence:** {}\n\n**Source:** {}\n\n---\n\n{}",
+                                            sol.issue_title, sol.issue_severity, sol.issue_status,
+                                            sol.confidence, sol.source_url, sol.summary
+                                        );
+                                        let title = sol.issue_title.clone();
+                                        open_mdr(&mut app, &title, &content);
+                                    }
+                                }
                             }
                             _ => { handled = false; }
                         }
@@ -618,7 +732,9 @@ fn main() -> io::Result<()> {
                                     SolveFocus::AiList => app.solve_state.focus = SolveFocus::HumanList,
                                     SolveFocus::Solved => app.solve_state.focus = SolveFocus::HumanList,
                                     SolveFocus::AiActions => {
-                                        if app.solve_state.active_button < 2 {
+                                        let max_btn = if app.solve_state.auto_solve_mode != AutoSolveMode::Off
+                                            || app.solve_state.progress == SolveProgress::Solving { 5 } else { 4 };
+                                        if app.solve_state.active_button < max_btn {
                                             app.solve_state.active_button += 1;
                                         }
                                     }
@@ -665,6 +781,23 @@ fn main() -> io::Result<()> {
                                     _ => { handled = false; }
                                 }
                             }
+                            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                                // Shift+Enter: open overlay for selected item
+                                let item_info = match app.solve_state.focus {
+                                    SolveFocus::AiList => {
+                                        app.solve_state.ai_items.get(app.solve_state.ai_selected)
+                                            .map(|i| (i.name.clone(), format!("# {}\n\n{}", i.name, i.summary)))
+                                    }
+                                    SolveFocus::HumanList => {
+                                        app.solve_state.human_items.get(app.solve_state.human_selected)
+                                            .map(|i| (i.name.clone(), format!("# {}\n\n{}", i.name, i.summary)))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some((title, md)) = item_info {
+                                    open_mdr(&mut app, &title, &md);
+                                }
+                            }
                             KeyCode::Enter => {
                                 match app.solve_state.focus {
                                     SolveFocus::AiActions => {
@@ -672,6 +805,40 @@ fn main() -> io::Result<()> {
                                             0 => {
                                                 // Solve
                                                 if app.solve_state.progress == SolveProgress::Idle {
+                                                    let tick = app.tick_count;
+                                                    let mesh_db = app.mesh_db_path();
+                                                    let research_db = app.research_db_path.clone();
+                                                    let env_map = io_layer::env_store::load(&app.env_path);
+                                                    for item in app.solve_state.ai_items.iter_mut().filter(|i| i.checked && !i.dispatched) {
+                                                        item.dispatched = true;
+                                                        item.dispatch_tick = Some(tick);
+                                                        let item_id = item.id;
+                                                        let name = item.name.clone();
+                                                        let summary = item.summary.clone();
+                                                        let cluster_id = item.cluster_id;
+                                                        let is_surface = item.surface;
+                                                        let mdb = mesh_db.clone();
+                                                        let rdb = research_db.clone();
+                                                        let ev = env_map.clone();
+                                                        std::thread::spawn(move || {
+                                                            if let Some(mdb) = mdb {
+                                                                let ctx = io_layer::db::fetch_cluster_context(&mdb, &rdb, cluster_id, &name, &summary);
+                                                                let ea_peer = "12D3KooWJtKPNjyKXjLTSmccExB9saN6N8mHuuZEMPa7M7LrDsSk";
+                                                                let msg = build_ea_message(item_id, &ctx, is_surface);
+                                                                let ok = std::process::Command::new("aqua")
+                                                                    .args(["--dir", "/home/typhoon/.aqua/main", "send", ea_peer, "--message", &msg, "--topic", "ea.task"])
+                                                                    .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                                                                    .status().map(|s| s.success()).unwrap_or(false);
+                                                                if !ok {
+                                                                    let _ = std::process::Command::new("aqua")
+                                                                        .args(["send", ea_peer, "--message", &msg, "--topic", "ea.task"])
+                                                                        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                                                                        .status();
+                                                                }
+                                                                if !is_surface { cleanup_airtable_for_cluster(&name, &ev); }
+                                                            }
+                                                        });
+                                                    }
                                                     app.solve_state.start_solve(app.tick_count);
                                                 }
                                             }
@@ -684,12 +851,54 @@ fn main() -> io::Result<()> {
                                                 let tick = app.tick_count;
                                                 app.solve_state.dissolve_checked(tick);
                                             }
+                                            3 => {
+                                                // Auto-Solve All toggle
+                                                app.solve_state.auto_solve_mode = match app.solve_state.auto_solve_mode {
+                                                    AutoSolveMode::All => AutoSolveMode::Off,
+                                                    _ => AutoSolveMode::All,
+                                                };
+                                            }
+                                            4 => {
+                                                // Auto-Solve Selected toggle
+                                                app.solve_state.auto_solve_mode = match app.solve_state.auto_solve_mode {
+                                                    AutoSolveMode::Selected => AutoSolveMode::Off,
+                                                    _ => AutoSolveMode::Selected,
+                                                };
+                                            }
+                                            5 => { app.solve_state.stop_auto_solve(); }
                                             _ => {}
                                         }
                                     }
                                     SolveFocus::AiList => {
-                                        // Enter on AI list goes to actions
-                                        app.solve_state.focus = SolveFocus::AiActions;
+                                        if let Some(idx) = app.solve_state.ai_list_state.selected() {
+                                            if let Some(item) = app.solve_state.ai_items.get(idx) {
+                                                let mut content = format!("**Classification:** AI Solvable — automated action signals detected\n\n# {}\n\n## Strategy\n{}", item.name, item.summary);
+                                                if !item.actions.is_empty() {
+                                                    content.push_str("\n\n## Auto Actions\n");
+                                                    for (i, a) in item.actions.iter().enumerate() {
+                                                        content.push_str(&format!("{}. {}\n", i + 1, a));
+                                                    }
+                                                }
+                                                let title = item.name.clone();
+                                                open_mdr(&mut app, &title, &content);
+                                            }
+                                        }
+                                    }
+                                    SolveFocus::HumanList => {
+                                        if let Some(idx) = app.solve_state.human_list_state.selected() {
+                                            if let Some(item) = app.solve_state.human_items.get(idx) {
+                                                let content = format!("**Classification:** Human Solvable — human involvement signals or no AI signals\n\n# {}\n\n## Strategy\n{}", item.name, item.summary);
+                                                let title = item.name.clone();
+                                                open_mdr(&mut app, &title, &content);
+                                            }
+                                        }
+                                    }
+                                    SolveFocus::Solved => {
+                                        if let Some(item) = app.solve_state.solved_items.get(app.solve_state.solved_selected) {
+                                            let content = format!("**Status:** Solved ({})\n\n# {}\n\n## Summary\n{}", item.solved_at, item.name, item.summary);
+                                            let title = item.name.clone();
+                                            open_mdr(&mut app, &title, &content);
+                                        }
                                     }
                                     _ => { handled = false; }
                                 }
@@ -697,6 +906,40 @@ fn main() -> io::Result<()> {
                             KeyCode::Char('s') => {
                                 // Quick solve shortcut
                                 if app.solve_state.progress == SolveProgress::Idle {
+                                    let tick = app.tick_count;
+                                    let mesh_db = app.mesh_db_path();
+                                    let research_db = app.research_db_path.clone();
+                                    let env_map = io_layer::env_store::load(&app.env_path);
+                                    for item in app.solve_state.ai_items.iter_mut().filter(|i| i.checked && !i.dispatched) {
+                                        item.dispatched = true;
+                                        item.dispatch_tick = Some(tick);
+                                        let item_id = item.id;
+                                        let name = item.name.clone();
+                                        let summary = item.summary.clone();
+                                        let cluster_id = item.cluster_id;
+                                        let is_surface = item.surface;
+                                        let mdb = mesh_db.clone();
+                                        let rdb = research_db.clone();
+                                        let ev = env_map.clone();
+                                        std::thread::spawn(move || {
+                                            if let Some(mdb) = mdb {
+                                                let ctx = io_layer::db::fetch_cluster_context(&mdb, &rdb, cluster_id, &name, &summary);
+                                                let ea_peer = "12D3KooWJtKPNjyKXjLTSmccExB9saN6N8mHuuZEMPa7M7LrDsSk";
+                                                let msg = build_ea_message(item_id, &ctx, is_surface);
+                                                let ok = std::process::Command::new("aqua")
+                                                    .args(["--dir", "/home/typhoon/.aqua/main", "send", ea_peer, "--message", &msg, "--topic", "ea.task"])
+                                                    .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                                                    .status().map(|s| s.success()).unwrap_or(false);
+                                                if !ok {
+                                                    let _ = std::process::Command::new("aqua")
+                                                        .args(["send", ea_peer, "--message", &msg, "--topic", "ea.task"])
+                                                        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                                                        .status();
+                                                }
+                                                if !is_surface { cleanup_airtable_for_cluster(&name, &ev); }
+                                            }
+                                        });
+                                    }
                                     app.solve_state.start_solve(app.tick_count);
                                 }
                             }
@@ -709,6 +952,17 @@ fn main() -> io::Result<()> {
                                 let tick = app.tick_count;
                                 app.solve_state.dissolve_checked(tick);
                             }
+                            KeyCode::Char('X') | KeyCode::Char('x') => {
+                                // X = emergency stop auto-solve
+                                app.solve_state.stop_auto_solve();
+                            }
+                            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                // Ctrl+A: toggle Auto-Solve All mode
+                                app.solve_state.auto_solve_mode = match app.solve_state.auto_solve_mode {
+                                    AutoSolveMode::All => AutoSolveMode::Off,
+                                    _ => AutoSolveMode::All,
+                                };
+                            }
                             KeyCode::Char('a') => {
                                 // Select all AI items
                                 let all_checked = app.solve_state.ai_items.iter().all(|i| i.checked);
@@ -718,6 +972,13 @@ fn main() -> io::Result<()> {
                             }
                             KeyCode::Char('/') => {
                                 app.solve_state.search.activate();
+                            }
+                            KeyCode::Char('m') | KeyCode::Char('M') => {
+                                match app.solve_state.focus {
+                                    SolveFocus::AiList => app.solve_state.move_selected_to_human(),
+                                    SolveFocus::HumanList => app.solve_state.move_selected_to_ai(),
+                                    _ => { handled = false; }
+                                }
                             }
                             _ => { handled = false; }
                         }
@@ -875,7 +1136,23 @@ fn main() -> io::Result<()> {
                         _ => {}
                     }
                 }
-                Event::Mouse(mouse) => {
+                Event::Mouse(mouse_event) => {
+                    // Overlay mouse scroll
+                    if app.overlay.is_some() {
+                        match mouse_event.kind {
+                            MouseEventKind::ScrollUp => {
+                                if let Some(ref mut ov) = app.overlay { ov.scroll_up(3); }
+                            }
+                            MouseEventKind::ScrollDown => {
+                                if let Some(ref mut ov) = app.overlay { ov.scroll_down(3); }
+                            }
+                            _ => {}
+                        }
+                        terminal.draw(|f| ui::render(f, &mut app, &mut panel_areas, &mut tab_bar_state))?;
+                        continue;
+                    }
+
+                    let mouse = mouse_event;
                     // Welcome screen mouse handling
                     if app.screen == Screen::Welcome {
                         if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
@@ -927,10 +1204,24 @@ fn main() -> io::Result<()> {
                                     }
                                 }
                                 Tab::Solve => {
-                                    match app.solve_state.focus {
-                                        SolveFocus::AiList | SolveFocus::AiActions => app.solve_state.scroll_ai(delta),
-                                        SolveFocus::HumanList => app.solve_state.scroll_human(delta),
-                                        SolveFocus::Solved => app.solve_state.scroll_solved(delta),
+                                    let sr = app.solve_state.solved_rect;
+                                    if col >= sr.x && col < sr.x + sr.width && row >= sr.y && row < sr.y + sr.height {
+                                        // Mouse is over Solved panel — scroll it regardless of focus
+                                        let len = app.solve_state.solved_items.len();
+                                        if len > 0 {
+                                            let cur = app.solve_state.solved_list_state.selected().unwrap_or(0);
+                                            if delta < 0 {
+                                                app.solve_state.solved_list_state.select(Some(cur.saturating_sub(1)));
+                                            } else {
+                                                app.solve_state.solved_list_state.select(Some((cur + 1).min(len - 1)));
+                                            }
+                                        }
+                                    } else {
+                                        match app.solve_state.focus {
+                                            SolveFocus::AiList | SolveFocus::AiActions => app.solve_state.scroll_ai(delta),
+                                            SolveFocus::HumanList => app.solve_state.scroll_human(delta),
+                                            SolveFocus::Solved => app.solve_state.scroll_solved(delta),
+                                        }
                                     }
                                 }
                                 _ => {} // stub tabs have no scrollable content yet
@@ -1002,6 +1293,81 @@ fn main() -> io::Result<()> {
                 tick_since_refresh = 0;
             }
 
+            // Dispatch any newly-queued solve items to EA agent (auto-solve path)
+            {
+                let tick = app.tick_count;
+                let mesh_db = app.mesh_db_path();
+                let research_db = app.research_db_path.clone();
+                if let Some(mdb) = mesh_db {
+                    // Rate-limit: 1 dispatch per tick to prevent thread storm on auto-solve
+                    let mut dispatched_this_tick = false;
+                    let mut timeout_ids: Vec<u64> = Vec::new();
+
+                    for item in app.solve_state.ai_items.iter_mut() {
+                        // Check timeout: dispatched items with no response after DISPATCH_TIMEOUT_TICKS → move to Human
+                        if item.dispatched {
+                            if let Some(dt) = item.dispatch_tick {
+                                if tick.saturating_sub(dt) > DISPATCH_TIMEOUT_TICKS {
+                                    timeout_ids.push(item.id);
+                                }
+                            }
+                        }
+                        if dispatched_this_tick { continue; }
+                        if (item.solving || item.queued) && !item.dispatched {
+                            item.dispatched = true;
+                            item.dispatch_tick = Some(tick);
+                            dispatched_this_tick = true;
+                            let cluster_id = item.cluster_id;
+                            let item_id = item.id;
+                            let name = item.name.clone();
+                            let summary = item.summary.clone();
+                            let is_surface = item.surface;
+                            let mdb2 = mdb.clone();
+                            let rdb = research_db.clone();
+                            let env_map = io_layer::env_store::load(&app.env_path);
+                            std::thread::spawn(move || {
+                                let ctx = io_layer::db::fetch_cluster_context(&mdb2, &rdb, cluster_id, &name, &summary);
+                                let ea_peer = "12D3KooWJtKPNjyKXjLTSmccExB9saN6N8mHuuZEMPa7M7LrDsSk";
+                                let msg = build_ea_message(item_id, &ctx, is_surface);
+                                let ok = std::process::Command::new("aqua")
+                                    .args(["--dir", "/home/typhoon/.aqua/main", "send", ea_peer, "--message", &msg, "--topic", "ea.task"])
+                                    .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                                    .status().map(|s| s.success()).unwrap_or(false);
+                                if !ok {
+                                    let _ = std::process::Command::new("aqua")
+                                        .args(["send", ea_peer, "--message", &msg, "--topic", "ea.task"])
+                                        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                                        .status();
+                                }
+                                if !is_surface {
+                                    cleanup_airtable_for_cluster(&name, &env_map);
+                                }
+                            });
+                        }
+                    }
+
+                    // Move timed-out items to Human
+                    for id in timeout_ids {
+                        if let Some(pos) = app.solve_state.ai_items.iter().position(|i| i.id == id) {
+                            let mut item = app.solve_state.ai_items.remove(pos);
+                            item.dispatched = false; item.solving = false; item.queued = false;
+                            app.solve_state.human_items.push(item);
+                        }
+                    }
+                }
+            }
+
+            // Poll EA response file for completed/failed/reclassified items
+            poll_ea_responses(&mut app);
+
+            // Drain cleanup results
+            while let Ok((nl, ni, ns)) = cleanup_rx.try_recv() {
+                app.cleanup_total.0 += nl;
+                app.cleanup_total.1 += ni;
+                app.cleanup_total.2 += ns;
+                if nl + ni + ns > 0 { app.refresh(); }
+            }
+
             // Check for completed OAuth localhost redirect flow
             if let Ok(mut guard) = oauth_result.try_lock() {
                 if let Some(result) = guard.take() {
@@ -1063,6 +1429,267 @@ fn is_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
+/// Path where EA agent appends its resolve decisions as JSON lines.
+const EA_RESPONSES_PATH: &str =
+    "/home/typhoon/.openclaw/workspace-researcher-agent/db/ea-responses.jsonl";
+
+/// Maximum ticks before a dispatched item is auto-moved to Human Solvable (~60s at 200ms/tick).
+const DISPATCH_TIMEOUT_TICKS: u64 = 300;
+
+/// Parse a single line from ea-responses.jsonl.
+/// Expected format: {"item_id": N, "decision": "SOLVED|FAILED|AI_SOLVABLE|HUMAN_REQUIRED", "summary": "..."}
+fn parse_ea_response(line: &str) -> Option<(u64, String, String)> {
+    // item_id
+    let id_start = line.find("\"item_id\":")?;
+    let after_id = line[id_start + 10..].trim_start();
+    let id_end = after_id.find(|c: char| !c.is_ascii_digit())?;
+    let item_id: u64 = after_id[..id_end].parse().ok()?;
+
+    // decision
+    let dec_start = line.find("\"decision\":")?;
+    let after_dec = line[dec_start + 11..].trim_start().trim_start_matches('"');
+    let dec_end = after_dec.find('"')?;
+    let decision = after_dec[..dec_end].to_string();
+
+    // summary (optional)
+    let summary = if let Some(sum_start) = line.find("\"summary\":") {
+        let after_sum = line[sum_start + 10..].trim_start().trim_start_matches('"');
+        if let Some(sum_end) = after_sum.find('"') {
+            after_sum[..sum_end].to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    Some((item_id, decision, summary))
+}
+
+/// Poll ea-responses.jsonl for EA agent decisions and update solve state accordingly.
+fn poll_ea_responses(app: &mut App) {
+    let path = std::path::Path::new(EA_RESPONSES_PATH);
+    if !path.exists() { return; }
+    let content = match std::fs::read_to_string(path) { Ok(c) => c, Err(_) => return };
+    if content.trim().is_empty() { return; }
+
+    let mut processed_lines: Vec<String> = Vec::new();
+    let mesh_db = app.mesh_db_path();
+    let research_db = app.research_db_path.clone();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+
+        if let Some((item_id, decision, summary)) = parse_ea_response(trimmed) {
+            processed_lines.push(trimmed.to_string());
+            match decision.as_str() {
+                "AI_SOLVABLE" => {
+                    // Surface item researched → re-list as Deep (surface=false) with new summary
+                    if let Some(pos) = app.solve_state.ai_items.iter().position(|i| i.id == item_id && i.surface) {
+                        app.solve_state.ai_items[pos].surface = false;
+                        app.solve_state.ai_items[pos].dispatched = false;
+                        app.solve_state.ai_items[pos].solving = false;
+                        app.solve_state.ai_items[pos].queued = false;
+                        app.solve_state.ai_items[pos].dispatch_tick = None;
+                        if !summary.is_empty() {
+                            app.solve_state.ai_items[pos].summary = summary;
+                        }
+                    }
+                }
+                "HUMAN_REQUIRED" | "FAILED" => {
+                    // Move item to human list
+                    if let Some(pos) = app.solve_state.ai_items.iter().position(|i| i.id == item_id) {
+                        let mut item = app.solve_state.ai_items.remove(pos);
+                        item.dispatched = false; item.solving = false; item.queued = false;
+                        if !summary.is_empty() { item.summary = summary; }
+                        app.solve_state.human_items.push(item);
+                        app.solve_state.fix_ai_selection();
+                        app.solve_state.fix_human_selection();
+                    }
+                }
+                "SOLVED" => {
+                    if let Some(pos) = app.solve_state.ai_items.iter().position(|i| i.id == item_id) {
+                        let item = app.solve_state.ai_items.remove(pos);
+                        let cluster_id = item.cluster_id;
+                        let member_ids = item.member_ids_json.clone();
+                        let item_summary = if !summary.is_empty() { summary } else { item.summary.clone() };
+                        app.solve_state.solved_items.push(app::SolvedItem {
+                            name: item.name.clone(),
+                            method: "AI".to_string(),
+                            solved_at: chrono::Local::now().format("%H:%M").to_string(),
+                            summary: item_summary,
+                        });
+                        app.solve_state.fix_ai_selection();
+                        app.solve_state.fix_solved_selection();
+                        // Fire DB deletion in background
+                        if let Some(mdb) = mesh_db.clone() {
+                            let rdb = research_db.clone();
+                            std::thread::spawn(move || {
+                                let _ = io_layer::db::delete_solved_cluster(&mdb, &rdb, cluster_id, &member_ids);
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Rewrite file without processed lines
+    if !processed_lines.is_empty() {
+        let remaining: String = content.lines()
+            .filter(|l| !processed_lines.contains(&l.trim().to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(path, if remaining.is_empty() { String::new() } else { remaining + "\n" });
+    }
+
+    // If no dispatched items remain, transition to Idle
+    let any_dispatched = app.solve_state.ai_items.iter().any(|i| i.dispatched);
+    if !any_dispatched && app.solve_state.progress == SolveProgress::Solving {
+        app.solve_state.progress = SolveProgress::Done;
+    }
+}
+
+/// Build the EA task message for a solve item. Surface items get a deep research request;
+/// Deep items (surface=false) get a direct solve instruction.
+fn build_ea_message(item_id: u64, ctx: &io_layer::db::ClusterContext, is_surface: bool) -> String {
+    let mut msg = if is_surface {
+        format!(
+            "DEEP RESEARCH TASK\n\nCluster: {}\nItem ID: {}\n\nCurrent surface strategy:\n{}\n\n\
+             The action list is surface-only (notifications/logging). Research deeper: \
+             pull full context from this cluster's issues and solutions, determine if AI \
+             can concretely solve this (file edits, code changes, emails, config updates, etc.).\n\n\
+             When done, append EXACTLY ONE line to {}:\n\
+             If AI can solve it: {{\"item_id\": {}, \"decision\": \"AI_SOLVABLE\", \"summary\": \"<concrete steps>\"}}\n\
+             If human required: {{\"item_id\": {}, \"decision\": \"HUMAN_REQUIRED\", \"summary\": \"<reason>\"}}\n",
+            ctx.cluster_name, item_id, ctx.strategy_summary,
+            EA_RESPONSES_PATH, item_id, item_id
+        )
+    } else {
+        format!(
+            "SOLVE TASK\n\nCluster: {}\nItem ID: {}\n\nStrategy:\n{}\n",
+            ctx.cluster_name, item_id, ctx.strategy_summary
+        )
+    };
+
+    if !ctx.issues.is_empty() {
+        msg.push_str("\nIssues:\n");
+        for (t, s) in &ctx.issues { msg.push_str(&format!("  - {} [{}]\n", t, s)); }
+    }
+    if !ctx.solutions.is_empty() {
+        msg.push_str("\nSolutions to execute:\n");
+        for (i, s) in &ctx.solutions { msg.push_str(&format!("  Issue: {}\n  Solution: {}\n\n", i, s)); }
+    }
+
+    if !is_surface {
+        msg.push_str(&format!(
+            "\nInstructions: Execute each solution concretely — edit files, draft emails into Drafts \
+             folders, write documents, fix configs/code in-place. Do NOT log to Airtable. \
+             Actually perform the work.\n\n\
+             When complete, append to {}:\n\
+             {{\"item_id\": {}, \"decision\": \"SOLVED\", \"summary\": \"<what was done>\"}}\n\
+             If unable to complete: {{\"item_id\": {}, \"decision\": \"FAILED\", \"summary\": \"<reason>\"}}",
+            EA_RESPONSES_PATH, item_id, item_id
+        ));
+    }
+
+    msg
+}
+
+fn dispatch_solve_to_ea(app: &App, cluster_id: u64, item_name: &str, item_summary: &str) -> bool {
+    let mesh_db = match app.mesh_db_path() {
+        Some(p) => p,
+        None => return false,
+    };
+    let research_db = &app.research_db_path;
+
+    let ctx = io_layer::db::fetch_cluster_context(&mesh_db, research_db, cluster_id, item_name, item_summary);
+
+    let mut msg = format!(
+        "SOLVE TASK\n\nCluster: {}\n\nStrategy:\n{}\n",
+        ctx.cluster_name, ctx.strategy_summary
+    );
+
+    if !ctx.issues.is_empty() {
+        msg.push_str("\nIssues:\n");
+        for (title, severity) in &ctx.issues {
+            msg.push_str(&format!("  - {} [{}]\n", title, severity));
+        }
+    }
+
+    if !ctx.solutions.is_empty() {
+        msg.push_str("\nSolutions to execute:\n");
+        for (issue, sol) in &ctx.solutions {
+            msg.push_str(&format!("  Issue: {}\n  Solution: {}\n\n", issue, sol));
+        }
+    }
+
+    msg.push_str("\nInstructions: Execute each solution concretely — edit files, draft emails into Drafts folders, write documents to appropriate directories, fix configs/code in-place. Do NOT log to Airtable. Actually perform the work and report what was done.");
+
+    let ea_peer = "12D3KooWJtKPNjyKXjLTSmccExB9saN6N8mHuuZEMPa7M7LrDsSk";
+
+    let result = std::process::Command::new("aqua")
+        .args(["--dir", "/home/typhoon/.aqua/main", "send", ea_peer, "--message", &msg, "--topic", "ea.task"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !result {
+        std::process::Command::new("aqua")
+            .args(["send", ea_peer, "--message", &msg, "--topic", "ea.task"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        result
+    }
+}
+
+fn cleanup_airtable_for_cluster(cluster_name: &str, env_map: &std::collections::HashMap<String, String>) {
+    let api_key = env_map.get("AIRTABLE_API_KEY").cloned().unwrap_or_default();
+    let base_id = env_map.get("AIRTABLE_BASE_ID").cloned().unwrap_or_default();
+    let table_id = env_map.get("AIRTABLE_RESEARCH_TABLE_ID").cloned().unwrap_or_default();
+    if api_key.is_empty() || base_id.is_empty() || table_id.is_empty() {
+        return;
+    }
+
+    let safe_name = cluster_name.replace('"', "\\\"").replace(' ', "%20");
+    let filter = format!("filterByFormula=FIND(%22{}%22%2C%7BName%7D)", safe_name);
+    let list_url = format!("https://api.airtable.com/v0/{}/{}?{}", base_id, table_id, filter);
+
+    let auth = format!("Authorization: Bearer {}", api_key);
+    let output = std::process::Command::new("curl")
+        .args(["-s", "-H", &auth, &list_url])
+        .output();
+
+    if let Ok(out) = output {
+        let body = String::from_utf8_lossy(&out.stdout);
+        let mut pos = 0;
+        let mut record_ids = Vec::new();
+        while let Some(i) = body[pos..].find("\"id\":\"rec") {
+            let start = pos + i + 6;
+            if let Some(end) = body[start..].find('"') {
+                record_ids.push(body[start..start + end].to_string());
+                pos = start + end;
+            } else {
+                break;
+            }
+        }
+        for rid in record_ids {
+            let del_url = format!("https://api.airtable.com/v0/{}/{}/{}", base_id, table_id, rid);
+            let _ = std::process::Command::new("curl")
+                .args(["-s", "-X", "DELETE", "-H", &auth, &del_url])
+                .output();
+        }
+    }
+}
+
+fn open_mdr(app: &mut App, title: &str, content: &str) {
+    app.overlay = Some(crate::app::OverlayState::new(title.to_string(), content.to_string()));
+}
+
 fn save_portal_section(app: &App, section: &str) {
     use io_layer::env_store;
     let mut values = HashMap::new();
@@ -1073,16 +1700,45 @@ fn save_portal_section(app: &App, section: &str) {
         }
         "dropbox" => {
             values.insert("DROPBOX_TOKEN".to_string(), app.portal.dropbox_token.value.clone());
+            values.insert("DROPBOX_REFRESH_TOKEN".to_string(), app.portal.dropbox_token.value.clone());
         }
         "imap" => {
             values.insert("IMAP_HOST".to_string(), app.portal.imap_host.value.clone());
             values.insert("IMAP_PORT".to_string(), app.portal.imap_port.value.clone());
+            // Write both key variants so learn --tui and Solvable both pick them up
             values.insert("IMAP_USER".to_string(), app.portal.imap_user.value.clone());
+            values.insert("IMAP_USERNAME".to_string(), app.portal.imap_user.value.clone());
             values.insert("IMAP_PASS".to_string(), app.portal.imap_pass.value.clone());
+            values.insert("IMAP_PASSWORD".to_string(), app.portal.imap_pass.value.clone());
         }
         "airtable" => {
             values.insert("AIRTABLE_API_KEY".to_string(), app.portal.airtable_key.value.clone());
             values.insert("AIRTABLE_BASE_ID".to_string(), app.portal.airtable_base.value.clone());
+        }
+        "protonmail" => {
+            values.insert("PROTONMAIL_USERNAME".to_string(), app.portal.protonmail_user.value.clone());
+            values.insert("PROTONMAIL_BRIDGE_PW".to_string(), app.portal.protonmail_pass.value.clone());
+        }
+        "gmail" => {
+            values.insert("GMAIL_USER".to_string(), app.portal.gmail_user.value.clone());
+            values.insert("GMAIL_PASS".to_string(), app.portal.gmail_pass.value.clone());
+        }
+        "m365_heartlab" => {
+            values.insert("M365_HEARTLAB_USER".to_string(), app.portal.m365_hl_user.value.clone());
+            values.insert("M365_HEARTLAB_APPLICATION_CLIENT_ID".to_string(), app.portal.m365_hl_client_id.value.clone());
+            values.insert("M365_HEARTLAB_CLIENT_VALUE".to_string(), app.portal.m365_hl_client_secret.value.clone());
+            values.insert("M365_HEARTLAB_DIRECTORY_ID".to_string(), app.portal.m365_hl_tenant.value.clone());
+        }
+        "m365_medishift" => {
+            values.insert("M365_MEDISHIFT_USER".to_string(), app.portal.m365_ms_user.value.clone());
+            values.insert("M365_MEDISHIFT_APPLICATION_CLIENT_ID".to_string(), app.portal.m365_ms_client_id.value.clone());
+            values.insert("M365_MEDISHIFT_CLIENT_VALUE".to_string(), app.portal.m365_ms_client_secret.value.clone());
+            values.insert("M365_MEDISHIFT_DIRECTORY_ID".to_string(), app.portal.m365_ms_tenant.value.clone());
+        }
+        "services" => {
+            values.insert("N8N_API_KEY".to_string(), app.portal.n8n_key.value.clone());
+            values.insert("SUPABASE_ACCESS_TOKEN".to_string(), app.portal.supabase_token.value.clone());
+            values.insert("SUPABASE_ANON_KEY".to_string(), app.portal.supabase_anon.value.clone());
         }
         _ => {}
     }

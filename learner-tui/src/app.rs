@@ -1,4 +1,5 @@
 use chrono::Local;
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
 use crate::io_layer::db::{
@@ -11,6 +12,27 @@ use crate::screens::portal::PortalState;
 use crate::screens::settings::SettingsState;
 use crate::widgets::search::SearchState;
 use crate::widgets::tree::TreeState;
+
+#[derive(Debug, Clone)]
+pub struct OverlayState {
+    pub title: String,
+    pub content: String,
+    pub scroll: u16,
+    pub total_lines: u16,
+}
+
+impl OverlayState {
+    pub fn new(title: String, content: String) -> Self {
+        Self { title, content, scroll: 0, total_lines: 0 }
+    }
+    pub fn scroll_up(&mut self, n: u16) {
+        self.scroll = self.scroll.saturating_sub(n);
+    }
+    pub fn scroll_down(&mut self, n: u16) {
+        let max = self.total_lines.saturating_sub(20);
+        self.scroll = (self.scroll + n).min(max);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -128,6 +150,7 @@ pub struct IssuesState {
     pub loaded: bool,
     pub tree: TreeState,
     pub search: SearchState,
+    pub clusters_rect: Rect,
 }
 
 impl Default for IssuesState {
@@ -147,6 +170,7 @@ impl Default for IssuesState {
             loaded: false,
             tree: TreeState::default(),
             search: SearchState::default(),
+            clusters_rect: Rect::default(),
         }
     }
 }
@@ -271,6 +295,13 @@ impl SolutionsState {
 // ──────────────── Solve Tab State ────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoSolveMode {
+    Off,
+    All,
+    Selected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolveFocus {
     AiList,
     HumanList,
@@ -287,20 +318,29 @@ pub enum SolveProgress {
 
 pub struct SolveItem {
     pub id: u64,
+    pub cluster_id: u64,
     pub name: String,
     pub summary: String,
+    pub actions: Vec<String>,
+    pub member_ids_json: String, // raw JSON from issue_clusters.member_ids (for DB deletion)
     pub checked: bool,
     pub strikethrough: bool,
     pub strikethrough_tick: Option<u64>,
     pub green_flash_until: Option<u64>,
-    pub solving: bool,      // currently being solved
-    pub queued: bool,       // in solve queue
+    pub solving: bool,           // currently being solved
+    pub queued: bool,            // in solve queue
+    pub dispatched: bool,        // true after EA dispatch sent
+    pub dispatch_tick: Option<u64>, // tick when dispatched (for timeout detection)
+    pub failed: bool,            // true if EA reported failure or timeout exceeded
+    pub surface: bool,           // true = all actions are surface-only → needs deep research
+    pub severity: u8,            // 0=critical 1=high 2=medium 3=low (priority ordering)
 }
 
 pub struct SolvedItem {
     pub name: String,
     pub method: String,     // "AI" or "Human"
     pub solved_at: String,
+    pub summary: String,    // strategy summary stored for mdr overlay
 }
 
 pub struct SolveState {
@@ -318,7 +358,8 @@ pub struct SolveState {
     pub solve_queue: Vec<usize>,      // indices into ai_items
     pub solve_current: usize,         // current index in solve_queue
     pub solve_tick: u64,              // tick when current solve started
-    pub active_button: usize,         // 0=Solve, 1=Transfer, 2=Dissolve
+    pub active_button: usize,         // 0=Solve, 1=Transfer, 2=Dissolve, 3=AutoAll, 4=AutoSel, 5=Stop
+    pub auto_solve_mode: AutoSolveMode,
     pub loaded: bool,
     pub ai_count: u64,
     pub human_count: u64,
@@ -326,6 +367,7 @@ pub struct SolveState {
     pub search: SearchState,
     pub ai_tree: TreeState,
     pub human_tree: TreeState,
+    pub solved_rect: Rect,
 }
 
 impl Default for SolveState {
@@ -346,6 +388,7 @@ impl Default for SolveState {
             solve_current: 0,
             solve_tick: 0,
             active_button: 0,
+            auto_solve_mode: AutoSolveMode::Off,
             loaded: false,
             ai_count: 0,
             human_count: 0,
@@ -353,6 +396,7 @@ impl Default for SolveState {
             search: SearchState::default(),
             ai_tree: TreeState::default(),
             human_tree: TreeState::default(),
+            solved_rect: Rect::default(),
         }
     }
 }
@@ -446,14 +490,22 @@ impl SolveState {
             if item.checked {
                 transferred.push(SolveItem {
                     id: item.id,
+                    cluster_id: item.cluster_id,
                     name: item.name.clone(),
                     summary: item.summary.clone(),
+                    actions: item.actions.clone(),
+                    member_ids_json: item.member_ids_json.clone(),
                     checked: false,
                     strikethrough: false,
                     strikethrough_tick: None,
                     green_flash_until: None,
                     solving: false,
                     queued: false,
+                    dispatched: false,
+                    dispatch_tick: None,
+                    failed: false,
+                    surface: item.surface,
+                    severity: item.severity,
                 });
             } else {
                 keep_indices.push(i);
@@ -461,9 +513,12 @@ impl SolveState {
         }
         let remaining: Vec<SolveItem> = keep_indices.into_iter()
             .map(|i| std::mem::replace(&mut self.ai_items[i], SolveItem {
-                id: 0, name: String::new(), summary: String::new(),
+                id: 0, cluster_id: 0, name: String::new(), summary: String::new(),
+                actions: Vec::new(), member_ids_json: String::new(),
                 checked: false, strikethrough: false, strikethrough_tick: None,
                 green_flash_until: None, solving: false, queued: false,
+                dispatched: false, dispatch_tick: None, failed: false,
+                surface: false, severity: 3,
             }))
             .collect();
         self.ai_items = remaining;
@@ -487,46 +542,34 @@ impl SolveState {
     pub fn tick(&mut self, tick: u64) -> bool {
         let mut changed = false;
 
-        // Process solve queue
-        if self.progress == SolveProgress::Solving {
-            let elapsed = tick.wrapping_sub(self.solve_tick);
-            if elapsed >= 10 {  // 2 seconds per item (10 ticks at 200ms)
-                if let Some(&idx) = self.solve_queue.get(self.solve_current) {
-                    // Complete current solve
-                    self.ai_items[idx].solving = false;
-                    self.ai_items[idx].green_flash_until = Some(tick + 25); // 5s flash
-
-                    let now = chrono::Local::now().format("%H:%M").to_string();
-                    self.solved_items.push(SolvedItem {
-                        name: self.ai_items[idx].name.clone(),
-                        method: "AI".to_string(),
-                        solved_at: now,
-                    });
-
-                    // Advance to next item
-                    self.solve_current += 1;
-                    if self.solve_current < self.solve_queue.len() {
-                        let next_idx = self.solve_queue[self.solve_current];
-                        self.ai_items[next_idx].solving = true;
-                        self.ai_items[next_idx].queued = false;
-                        self.solve_tick = tick;
-                    } else {
-                        // All done, remove solved items from AI list
-                        let solved_ids: Vec<u64> = self.solve_queue.iter()
-                            .filter_map(|&i| self.ai_items.get(i).map(|item| item.id))
-                            .collect();
-                        self.ai_items.retain(|item| !solved_ids.contains(&item.id));
-                        self.solve_queue.clear();
-                        self.progress = SolveProgress::Done;
-                        self.fix_ai_selection();
-                        self.fix_solved_selection();
+        // Auto-solve: when idle, automatically queue items based on mode
+        if self.auto_solve_mode != AutoSolveMode::Off && self.progress == SolveProgress::Idle
+            && self.solve_queue.is_empty()
+        {
+            match self.auto_solve_mode {
+                AutoSolveMode::All => {
+                    let any_pending = self.ai_items.iter().any(|i| !i.strikethrough && !i.solving && !i.queued);
+                    if any_pending {
+                        for item in self.ai_items.iter_mut() {
+                            if !item.strikethrough && !item.solving && !item.queued {
+                                item.checked = true;
+                            }
+                        }
+                        self.start_solve(tick);
+                        changed = true;
                     }
-                    changed = true;
                 }
+                AutoSolveMode::Selected => {
+                    if self.ai_items.iter().any(|i| i.checked && !i.strikethrough) {
+                        self.start_solve(tick);
+                        changed = true;
+                    }
+                }
+                AutoSolveMode::Off => {}
             }
         }
 
-        // Clear Done state after a moment
+        // Clear Done state (transition is now driven by poll_ea_responses in main.rs)
         if self.progress == SolveProgress::Done {
             self.progress = SolveProgress::Idle;
         }
@@ -551,6 +594,7 @@ impl SolveState {
                             name: item.name.clone(),
                             method: "Human".to_string(),
                             solved_at: chrono::Local::now().format("%H:%M").to_string(),
+                            summary: item.summary.clone(),
                         });
                         return false;
                     }
@@ -565,22 +609,35 @@ impl SolveState {
             changed = true;
         }
 
-        // Process AI dissolve strikethrough auto-deletes
+        // Process AI dissolve strikethrough auto-deletes — graduate to solved after 15 ticks
+        let mut ai_graduate: Vec<SolvedItem> = Vec::new();
         self.ai_items.retain(|item| {
             if item.strikethrough {
                 if let Some(st) = item.strikethrough_tick {
-                    if tick.wrapping_sub(st) >= 25 {
+                    if tick.wrapping_sub(st) >= 15 {
+                        ai_graduate.push(SolvedItem {
+                            name: item.name.clone(),
+                            method: "AI".to_string(),
+                            solved_at: chrono::Local::now().format("%H:%M").to_string(),
+                            summary: item.summary.clone(),
+                        });
                         return false;
                     }
                 }
             }
             true
         });
+        if !ai_graduate.is_empty() {
+            self.solved_items.extend(ai_graduate);
+            self.fix_ai_selection();
+            self.fix_solved_selection();
+            changed = true;
+        }
 
         changed
     }
 
-    fn fix_ai_selection(&mut self) {
+    pub fn fix_ai_selection(&mut self) {
         if self.ai_items.is_empty() {
             self.ai_selected = 0;
             self.ai_list_state.select(None);
@@ -590,7 +647,7 @@ impl SolveState {
         }
     }
 
-    fn fix_human_selection(&mut self) {
+    pub fn fix_human_selection(&mut self) {
         if self.human_items.is_empty() {
             self.human_selected = 0;
             self.human_list_state.select(None);
@@ -600,7 +657,7 @@ impl SolveState {
         }
     }
 
-    fn fix_solved_selection(&mut self) {
+    pub fn fix_solved_selection(&mut self) {
         if self.solved_items.is_empty() {
             self.solved_selected = 0;
             self.solved_list_state.select(None);
@@ -612,6 +669,45 @@ impl SolveState {
 
     pub fn checked_ai_count(&self) -> usize {
         self.ai_items.iter().filter(|i| i.checked).count()
+    }
+
+    pub fn move_selected_to_human(&mut self) {
+        if let Some(idx) = self.ai_list_state.selected() {
+            if idx < self.ai_items.len() {
+                let item = self.ai_items.remove(idx);
+                self.human_items.push(item);
+                if self.ai_items.is_empty() {
+                    self.ai_list_state.select(None);
+                } else {
+                    self.ai_list_state.select(Some(idx.min(self.ai_items.len() - 1)));
+                }
+            }
+        }
+    }
+
+    pub fn stop_auto_solve(&mut self) {
+        self.auto_solve_mode = AutoSolveMode::Off;
+        self.solve_queue.clear();
+        self.progress = SolveProgress::Idle;
+        // unmark any queued items
+        for item in &mut self.ai_items {
+            item.queued = false;
+            item.solving = false;
+        }
+    }
+
+    pub fn move_selected_to_ai(&mut self) {
+        if let Some(idx) = self.human_list_state.selected() {
+            if idx < self.human_items.len() {
+                let item = self.human_items.remove(idx);
+                self.ai_items.push(item);
+                if self.human_items.is_empty() {
+                    self.human_list_state.select(None);
+                } else {
+                    self.human_list_state.select(Some(idx.min(self.human_items.len() - 1)));
+                }
+            }
+        }
     }
 }
 
@@ -811,7 +907,8 @@ pub struct App {
     pub email_runs_state: ListState,
     pub recent_learnings_state: ListState,
     pub tick_count: u64,
-    db_path: String,
+    pub cleanup_total: (usize, usize, usize),  // (learnings, issues, solutions) purged lifetime
+    pub db_path: String,
 
     // Screen / navigation state
     pub screen: Screen,
@@ -830,7 +927,7 @@ pub struct App {
     pub research_issues_state: ListState,
     pub research_solutions_state: ListState,
     pub research_db_missing: bool,
-    research_db_path: String,
+    pub research_db_path: String,
 
     // Issues tab
     pub issues_state: IssuesState,
@@ -846,6 +943,9 @@ pub struct App {
 
     // Settings tab
     pub settings: SettingsState,
+
+    // Overlay (in-TUI markdown viewer)
+    pub overlay: Option<OverlayState>,
 }
 
 impl App {
@@ -881,6 +981,7 @@ impl App {
             email_runs_state: ListState::default(),
             recent_learnings_state: ListState::default(),
             tick_count: 0,
+            cleanup_total: (0, 0, 0),
             db_path,
             screen,
             env_path,
@@ -898,6 +999,7 @@ impl App {
             confluence_state: ConfluenceState::default(),
             solve_state: SolveState::default(),
             settings,
+            overlay: None,
         };
         app.refresh();
         app
@@ -1046,20 +1148,31 @@ impl App {
                     for analysis in data.analyses {
                         let item = SolveItem {
                             id: analysis.id,
+                            cluster_id: analysis.cluster_id,
                             name: analysis.cluster_name,
                             summary: analysis.strategy_summary,
+                            actions: analysis.auto_actions,
+                            member_ids_json: String::new(), // populated lazily on dispatch
                             checked: false,
                             strikethrough: false,
                             strikethrough_tick: None,
                             green_flash_until: None,
                             solving: false,
                             queued: false,
+                            dispatched: false,
+                            dispatch_tick: None,
+                            failed: false,
+                            surface: analysis.surface,
+                            severity: analysis.severity,
                         };
                         match analysis.solvable_by {
                             SolvableBy::AI => ai_items.push(item),
                             SolvableBy::Human | SolvableBy::Unknown => human_items.push(item),
                         }
                     }
+                    // Sort by severity: critical(0) first → low(3) last
+                    ai_items.sort_by_key(|i| i.severity);
+                    human_items.sort_by_key(|i| i.severity);
                     self.solve_state.ai_count = data.ai_count;
                     self.solve_state.human_count = data.human_count;
                     self.solve_state.total_count = data.ai_count + data.human_count;

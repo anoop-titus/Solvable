@@ -1,15 +1,15 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
     Frame,
 };
 
-use crate::app::{App, SolveFocus, SolveProgress};
+use crate::app::{App, AutoSolveMode, SolveFocus, SolveProgress};
 use crate::theme;
 use crate::widgets::search::{render_search_bar, render_search_results};
 
@@ -92,28 +92,44 @@ pub fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         "  /: search"
     };
 
+    let auto_active = app.solve_state.auto_solve_mode != AutoSolveMode::Off
+        || app.solve_state.progress == SolveProgress::Solving;
+
+    let mut hint_spans = vec![
+        Span::styled(
+            "  Space: toggle  Enter: detail  M: reclassify  Tab: cycle  L/R: columns",
+            theme::LABEL,
+        ),
+        Span::styled(search_hint, Style::default().fg(Color::Yellow)),
+        Span::styled("  ⚙:solving  ✉:dispatched  ⏳:queued  (S):surface→deep  (D):deep→solve", theme::LABEL),
+    ];
+    if auto_active {
+        hint_spans.push(Span::styled(
+            "  x: stop",
+            Style::default().fg(Color::Red),
+        ));
+    }
+
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("  Focus: ", theme::LABEL),
-            Span::styled(focus_label, Style::default().fg(Color::Cyan)),
-            Span::styled(
-                format!("  |  AI: {} items ({} checked)", app.solve_state.ai_items.len(), ai_checked),
-                theme::LABEL,
-            ),
-            Span::styled(
-                format!("  |  Human: {} items", app.solve_state.human_items.len()),
-                theme::LABEL,
-            ),
-            Span::styled(
-                &progress_text,
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "  |  Space: toggle  Enter: action  Tab: cycle  L/R: columns",
-                theme::LABEL,
-            ),
-            Span::styled(search_hint, Style::default().fg(Color::Yellow)),
-        ])),
+        Paragraph::new(Text::from(vec![
+            Line::from(vec![
+                Span::styled("  Focus: ", theme::LABEL),
+                Span::styled(focus_label, Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!("  |  AI: {} items ({} checked)", app.solve_state.ai_items.len(), ai_checked),
+                    theme::LABEL,
+                ),
+                Span::styled(
+                    format!("  |  Human: {} items", app.solve_state.human_items.len()),
+                    theme::LABEL,
+                ),
+                Span::styled(
+                    progress_text,
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(hint_spans),
+        ])).wrap(Wrap { trim: true }),
         area,
     );
 }
@@ -176,7 +192,7 @@ fn render_ai_column(f: &mut Frame, app: &mut App, area: Rect) {
     // Vertical split: list + action buttons row
     let vert = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(3)])
+        .constraints([Constraint::Min(4), Constraint::Length(4)])
         .split(area);
 
     let block = Block::default()
@@ -219,10 +235,33 @@ fn render_ai_column(f: &mut Frame, app: &mut App, area: Rect) {
             } else if item.solving {
                 Style::default().fg(Color::Yellow)
             } else {
-                theme::DATA
+                // Priority color based on severity
+                let sev_color = match item.severity {
+                    0 => Color::Red,
+                    1 => Color::LightRed,
+                    2 => Color::Yellow,
+                    _ => Color::Gray,
+                };
+                Style::default().fg(sev_color)
             };
 
-            let max_name = (inner.width as usize).saturating_sub(6);
+            let status_span = if item.solving {
+                Span::styled("⚙ ", Style::default().fg(Color::Yellow))
+            } else if item.dispatched {
+                Span::styled("✉ ", Style::default().fg(Color::Cyan))
+            } else if item.queued {
+                Span::styled("⏳ ", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::raw("  ")
+            };
+
+            let type_badge = if item.surface {
+                Span::styled("(S) ", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::styled("(D) ", Style::default().fg(Color::Cyan))
+            };
+
+            let max_name = (inner.width as usize).saturating_sub(12);
             let display_name: String = item.name.chars().take(max_name).collect();
             let display_name = if item.name.chars().count() > max_name && max_name > 3 {
                 format!("{}...", item.name.chars().take(max_name - 3).collect::<String>())
@@ -232,6 +271,8 @@ fn render_ai_column(f: &mut Frame, app: &mut App, area: Rect) {
 
             ListItem::new(Line::from(vec![
                 checkbox,
+                status_span,
+                type_badge,
                 Span::styled(display_name, name_style),
             ]))
         }).collect();
@@ -278,7 +319,7 @@ fn render_ai_column(f: &mut Frame, app: &mut App, area: Rect) {
         ("Dissolve", 2, Color::Red),
     ];
 
-    let mut btn_spans = vec![Span::styled(" ", theme::LABEL)];
+    let mut row1_spans = vec![Span::styled(" ", theme::LABEL)];
     for (label, idx, color) in &buttons {
         let style = if btn_focused && app.solve_state.active_button == *idx {
             Style::default().fg(Color::Black).bg(*color).add_modifier(Modifier::BOLD)
@@ -296,11 +337,63 @@ fn render_ai_column(f: &mut Frame, app: &mut App, area: Rect) {
             format!(" [{}] ", label)
         };
 
-        btn_spans.push(Span::styled(display, style));
-        btn_spans.push(Span::styled("  ", theme::LABEL));
+        row1_spans.push(Span::styled(display, style));
+        row1_spans.push(Span::styled("  ", theme::LABEL));
     }
 
-    f.render_widget(Paragraph::new(Line::from(btn_spans)), btn_inner);
+    // Auto-solve buttons on row 2
+    let auto_all_label = if app.solve_state.auto_solve_mode == AutoSolveMode::All {
+        " [Auto-Solve: ALL ●] "
+    } else {
+        " [Auto-Solve: ALL ○] "
+    };
+    let auto_sel_label = if app.solve_state.auto_solve_mode == AutoSolveMode::Selected {
+        " [Auto-Solve: SEL ●] "
+    } else {
+        " [Auto-Solve: SEL ○] "
+    };
+
+    let all_style = if app.solve_state.auto_solve_mode == AutoSolveMode::All {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else if btn_focused && app.solve_state.active_button == 3 {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let sel_style = if app.solve_state.auto_solve_mode == AutoSolveMode::Selected {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else if btn_focused && app.solve_state.active_button == 4 {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let show_stop = app.solve_state.auto_solve_mode != AutoSolveMode::Off
+        || app.solve_state.progress == SolveProgress::Solving;
+
+    let mut row2_spans = vec![
+        Span::styled(" ", theme::LABEL),
+        Span::styled(auto_all_label, all_style),
+        Span::styled("  ", theme::LABEL),
+        Span::styled(auto_sel_label, sel_style),
+    ];
+
+    if show_stop {
+        row2_spans.push(Span::styled("  ", theme::LABEL));
+        let stop_style = if btn_focused && app.solve_state.active_button == 5 {
+            Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        row2_spans.push(Span::styled(" [Stop] ", stop_style));
+    }
+
+    let line1 = Line::from(row1_spans);
+    let line2 = Line::from(row2_spans);
+    f.render_widget(
+        Paragraph::new(Text::from(vec![line1, line2])),
+        btn_inner,
+    );
 }
 
 fn render_human_column(f: &mut Frame, app: &mut App, area: Rect) {
@@ -374,6 +467,7 @@ fn render_human_column(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_solved_box(f: &mut Frame, app: &mut App, area: Rect) {
+    app.solve_state.solved_rect = area;
     let is_focused = app.solve_state.focus == SolveFocus::Solved;
     let border_color = if is_focused { Color::Green } else { Color::DarkGray };
 

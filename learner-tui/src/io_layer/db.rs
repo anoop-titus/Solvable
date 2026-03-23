@@ -704,6 +704,7 @@ pub enum SolvableBy {
 
 pub struct Lvl2Analysis {
     pub id: u64,
+    pub cluster_id: u64,
     pub cluster_name: String,
     pub strategy_summary: String,
     pub auto_actions: Vec<String>,
@@ -711,6 +712,8 @@ pub struct Lvl2Analysis {
     pub generated_at: String,
     pub solvable_by: SolvableBy,
     pub source: Lvl2Source,
+    pub severity: u8,   // 0=critical 1=high 2=medium 3=low (from issue_clusters join)
+    pub surface: bool,  // true if all auto_actions are surface-only (telegram/airtable/db_update)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -741,11 +744,15 @@ pub fn fetch_lvl2_analyses(mesh_db: &str) -> Option<Lvl2Data> {
 
     let mut analyses = Vec::new();
 
-    // Fetch cluster-level lvl2 analyses
+    // Fetch cluster-level lvl2 analyses (join issue_clusters for severity)
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, COALESCE(cluster_name, ''), COALESCE(strategy_summary, ''), \
-         COALESCE(auto_actions, '[]'), COALESCE(output_path, ''), \
-         COALESCE(generated_at, '') FROM lvl2_analyses ORDER BY id DESC",
+        "SELECT la.id, COALESCE(la.cluster_name,''), COALESCE(la.strategy_summary,''), \
+         COALESCE(la.auto_actions,'[]'), COALESCE(la.output_path,''), \
+         COALESCE(la.generated_at,''), COALESCE(la.cluster_id,0), \
+         COALESCE(ic.severity,'medium') \
+         FROM lvl2_analyses la \
+         LEFT JOIN issue_clusters ic ON ic.id = la.cluster_id \
+         ORDER BY la.id DESC",
     ) {
         if let Ok(rows) = stmt.query_map([], |row| {
             let id: u64 = row.get(0)?;
@@ -754,15 +761,20 @@ pub fn fetch_lvl2_analyses(mesh_db: &str) -> Option<Lvl2Data> {
             let auto_actions_json: String = row.get(3)?;
             let output_path: String = row.get(4)?;
             let generated_at: String = row.get(5)?;
-            Ok((id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at))
+            let cluster_id: u64 = row.get::<_, i64>(6).unwrap_or(0) as u64;
+            let severity_text: String = row.get(7)?;
+            Ok((id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at, cluster_id, severity_text))
         }) {
             for row in rows.flatten() {
-                let (id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at) = row;
+                let (id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at, cluster_id, severity_text) = row;
                 let parsed_actions = parse_auto_actions(&auto_actions_json);
-                let solvable_by = if parsed_actions.is_empty() {
-                    SolvableBy::Human
-                } else {
-                    SolvableBy::AI
+                let solvable_by = classify_by_strategy(&strategy_summary);
+                let surface = is_surface_only(&parsed_actions);
+                let severity = match severity_text.to_lowercase().as_str() {
+                    "critical" => 0,
+                    "high" => 1,
+                    "medium" => 2,
+                    _ => 3,
                 };
                 let display_time = if generated_at.len() >= 16 {
                     generated_at[..16].to_string()
@@ -771,6 +783,7 @@ pub fn fetch_lvl2_analyses(mesh_db: &str) -> Option<Lvl2Data> {
                 };
                 analyses.push(Lvl2Analysis {
                     id,
+                    cluster_id,
                     cluster_name,
                     strategy_summary,
                     auto_actions: parsed_actions,
@@ -778,6 +791,8 @@ pub fn fetch_lvl2_analyses(mesh_db: &str) -> Option<Lvl2Data> {
                     generated_at: display_time,
                     solvable_by,
                     source: Lvl2Source::Cluster,
+                    severity,
+                    surface,
                 });
             }
         }
@@ -802,18 +817,16 @@ pub fn fetch_lvl2_analyses(mesh_db: &str) -> Option<Lvl2Data> {
             for row in rows.flatten() {
                 let (id, cluster_name, strategy_summary, auto_actions_json, output_path, generated_at) = row;
                 let parsed_actions = parse_auto_actions(&auto_actions_json);
-                let solvable_by = if parsed_actions.is_empty() {
-                    SolvableBy::Human
-                } else {
-                    SolvableBy::AI
-                };
+                let solvable_by = classify_by_strategy(&strategy_summary);
                 let display_time = if generated_at.len() >= 16 {
                     generated_at[..16].to_string()
                 } else {
                     generated_at
                 };
+                let surface = is_surface_only(&parsed_actions);
                 analyses.push(Lvl2Analysis {
                     id: id + id_offset,
+                    cluster_id: 0, // issue-level analyses don't have a cluster_id FK
                     cluster_name: format!("[Issue] {}", cluster_name),
                     strategy_summary,
                     auto_actions: parsed_actions,
@@ -821,6 +834,8 @@ pub fn fetch_lvl2_analyses(mesh_db: &str) -> Option<Lvl2Data> {
                     generated_at: display_time,
                     solvable_by,
                     source: Lvl2Source::Issue,
+                    severity: 2, // no cluster join for issue-level; default medium
+                    surface,
                 });
             }
         }
@@ -834,6 +849,66 @@ pub fn fetch_lvl2_analyses(mesh_db: &str) -> Option<Lvl2Data> {
         ai_count,
         human_count,
     })
+}
+
+/// Returns true if ALL auto_actions are surface-only (telegram/airtable/db_update).
+/// Surface items need deep EA research before they can be solved.
+pub fn is_surface_only(actions: &[String]) -> bool {
+    if actions.is_empty() { return true; }
+    let surface = ["telegram", "airtable", "db_update", "database_update", "notification", "slack"];
+    actions.iter().all(|a| {
+        let lower = a.to_lowercase();
+        surface.iter().any(|kw| lower.contains(kw))
+    })
+}
+
+fn classify_by_strategy(summary: &str) -> SolvableBy {
+    let s = summary.to_lowercase();
+
+    // Human signals — take priority. If any match → Human.
+    let human_signals = [
+        "human-required", "human required", "human involvement",
+        "manual review", "manually", "requires manual",
+        "approval needed", "requires approval", "board approval",
+        "board decision", "committee", "ratif",
+        "hire ", "hiring", "recruit",
+        "clinical", "physician", "patient consent",
+        "physical", "on-site", "in-person",
+        "meeting", "workshop", "training session",
+        "legal review", "compliance officer", "executive decision",
+        "policy change", "policy ratification",
+    ];
+
+    for signal in &human_signals {
+        if s.contains(signal) {
+            return SolvableBy::Human;
+        }
+    }
+
+    // AI signals — only if no human signals matched.
+    let ai_signals = [
+        "automat",
+        "api call", "via api", "api integration", "rest api",
+        "script", "scripted",
+        "deploy", "deployment",
+        "webhook",
+        "cron", "scheduled task", "scheduled job",
+        "code fix", "code change", "bug fix", "patch",
+        "configuration update", "config change", "config update",
+        "database update", "db update", "sql query",
+        "credential", "api key", "token refresh",
+        "pipeline", "data pipeline",
+        "monitor", "alert rule", "threshold",
+    ];
+
+    for signal in &ai_signals {
+        if s.contains(signal) {
+            return SolvableBy::AI;
+        }
+    }
+
+    // Default: conservative — require human unless AI signal found
+    SolvableBy::Human
 }
 
 /// Parse auto_actions JSON field into descriptive strings.
@@ -873,4 +948,159 @@ fn parse_auto_actions(json_str: &str) -> Vec<String> {
 
     // If we couldn't parse it but it's not empty/null/[], treat as single action
     vec![trimmed.chars().take(100).collect()]
+}
+
+// ──────────────── Cluster Context (for EA dispatch) ────────────────
+
+pub struct ClusterContext {
+    pub cluster_name: String,
+    pub strategy_summary: String,
+    pub issues: Vec<(String, String)>,    // (title, severity)
+    pub solutions: Vec<(String, String)>, // (issue_title, solution_summary)
+}
+
+pub fn fetch_cluster_context(
+    mesh_db: &str,
+    research_db: &str,
+    cluster_id: u64,
+    cluster_name: &str,
+    strategy_summary: &str,
+) -> ClusterContext {
+    // Step 1: Get member_ids using cluster_id (the real FK)
+    let member_ids_json = {
+        if let Ok(conn) = Connection::open(mesh_db) {
+            conn.query_row(
+                "SELECT COALESCE(member_ids,'[]') FROM issue_clusters WHERE id=?1 LIMIT 1",
+                [cluster_id],
+                |r| r.get::<_, String>(0),
+            ).unwrap_or_else(|_| "[]".to_string())
+        } else {
+            "[]".to_string()
+        }
+    };
+
+    // Step 2: Parse member_ids — manual JSON array parse (no extra dep needed)
+    let ids: Vec<u64> = {
+        let s = member_ids_json.trim().trim_start_matches('[').trim_end_matches(']');
+        s.split(',')
+         .filter_map(|tok| tok.trim().parse::<u64>().ok())
+         .collect()
+    };
+
+    let mut issues = Vec::new();
+    let mut solutions = Vec::new();
+
+    if !ids.is_empty() {
+        if let Ok(conn) = Connection::open(research_db) {
+            for id in &ids {
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT COALESCE(title,''), COALESCE(severity,'medium') FROM issues WHERE id=?1"
+                ) {
+                    if let Ok((title, severity)) = stmt.query_row([id], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    }) {
+                        issues.push((title.clone(), severity));
+                        // Fetch top solutions for this issue
+                        if let Ok(mut s2) = conn.prepare(
+                            "SELECT COALESCE(summary,'') FROM solutions WHERE issue_id=?1 LIMIT 3"
+                        ) {
+                            if let Ok(rows) = s2.query_map([id], |r| r.get::<_, String>(0)) {
+                                for sol in rows.flatten() {
+                                    if !sol.is_empty() {
+                                        solutions.push((title.clone(), sol));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ClusterContext {
+        cluster_name: cluster_name.to_string(),
+        strategy_summary: strategy_summary.to_string(),
+        issues,
+        solutions,
+    }
+}
+
+/// Delete solutions containing "No actionable" from research.db,
+/// plus their linked issues and cascade records.
+/// Returns (issues_deleted, solutions_deleted).
+pub fn delete_no_actionable_research(research_db: &str) -> Result<(usize, usize), rusqlite::Error> {
+    let conn = Connection::open(research_db)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, issue_id FROM solutions WHERE summary LIKE '%No actionable%'"
+    )?;
+    let pairs: Vec<(i64, i64)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    if pairs.is_empty() { return Ok((0, 0)); }
+    let sol_ids: Vec<i64> = pairs.iter().map(|p| p.0).collect();
+    let issue_ids: Vec<i64> = pairs.iter().map(|p| p.1).collect();
+    for &iid in &issue_ids {
+        conn.execute("DELETE FROM actions WHERE issue_id=?1", [iid]).ok();
+        conn.execute("DELETE FROM repairs WHERE issue_id=?1", [iid]).ok();
+        conn.execute("DELETE FROM daily_output WHERE issue_id=?1", [iid]).ok();
+    }
+    for &sid in &sol_ids {
+        conn.execute("DELETE FROM daily_output WHERE solution_id=?1", [sid]).ok();
+        conn.execute("DELETE FROM solutions WHERE id=?1", [sid])?;
+    }
+    let n_issues = issue_ids.len();
+    for &iid in &issue_ids {
+        conn.execute("DELETE FROM issues WHERE id=?1", [iid])?;
+    }
+    Ok((n_issues, sol_ids.len()))
+}
+
+/// Delete a solved cluster from mesh.db and its linked issues/solutions from research.db.
+/// Called after EA confirms a cluster is SOLVED.
+pub fn delete_solved_cluster(
+    mesh_db: &str,
+    research_db: &str,
+    cluster_id: u64,
+    member_ids_json: &str,
+) -> Result<(), rusqlite::Error> {
+    // 1. Remove from mesh.db
+    {
+        let conn = Connection::open(mesh_db)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute("DELETE FROM lvl2_analyses WHERE cluster_id=?1", [cluster_id as i64])?;
+        conn.execute("DELETE FROM issue_clusters WHERE id=?1", [cluster_id as i64])?;
+    }
+
+    // 2. Parse member_ids JSON → Vec<i64>
+    let ids: Vec<i64> = {
+        let s = member_ids_json.trim().trim_start_matches('[').trim_end_matches(']');
+        s.split(',')
+         .filter_map(|tok| tok.trim().parse::<i64>().ok())
+         .collect()
+    };
+
+    if ids.is_empty() { return Ok(()); }
+
+    // 3. Delete linked issues and solutions from research.db
+    {
+        let conn = Connection::open(research_db)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        for &iid in &ids {
+            conn.execute("DELETE FROM actions WHERE issue_id=?1", [iid]).ok();
+            conn.execute("DELETE FROM repairs WHERE issue_id=?1", [iid]).ok();
+            conn.execute("DELETE FROM solutions WHERE issue_id=?1", [iid]).ok();
+            conn.execute("DELETE FROM issues WHERE id=?1", [iid]).ok();
+        }
+    }
+
+    Ok(())
+}
+
+/// Delete learnings whose text contains "No actionable" from learnings.db.
+pub fn delete_no_actionable_learnings(learnings_db: &str) -> Result<usize, rusqlite::Error> {
+    let conn = Connection::open(learnings_db)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    let n = conn.execute("DELETE FROM learnings WHERE learning LIKE '%No actionable%'", [])?;
+    Ok(n)
 }
